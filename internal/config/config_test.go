@@ -149,3 +149,156 @@ source = "/tmp/a"
 		t.Fatal("expected error for duplicate remote names, got nil")
 	}
 }
+
+func TestLoad_XDGConfigHome_ResolvesPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	confDir := filepath.Join(tmpDir, "sync-station")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatalf("creating config dir: %v", err)
+	}
+	tomlData := `
+external_drive = "/tmp/xdg-test"
+[[sync]]
+name = "xdg-job"
+sources = ["/tmp/src"]
+destination = "/tmp/dst"
+`
+	if err := os.WriteFile(filepath.Join(confDir, "config.toml"), []byte(tomlData), 0o644); err != nil {
+		t.Fatalf("writing config file: %v", err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ExternalDrive != "/tmp/xdg-test" {
+		t.Errorf("ExternalDrive = %q, want /tmp/xdg-test", cfg.ExternalDrive)
+	}
+	if len(cfg.SyncJobs) != 1 || cfg.SyncJobs[0].Name != "xdg-job" {
+		t.Errorf("SyncJobs = %v, want one job named xdg-job", cfg.SyncJobs)
+	}
+}
+
+func TestJobNames_ReturnsNamesInOrder(t *testing.T) {
+	tomlData := `
+external_drive = "/tmp/test"
+[[sync]]
+name = "alpha"
+sources = ["/tmp/a"]
+destination = "/tmp/dst"
+[[sync]]
+name = "beta"
+sources = ["/tmp/b"]
+destination = "/tmp/dst"
+[[sync]]
+name = "gamma"
+sources = ["/tmp/c"]
+destination = "/tmp/dst"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := cfg.JobNames()
+	want := []string{"alpha", "beta", "gamma"}
+	if len(got) != len(want) {
+		t.Fatalf("JobNames() len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("JobNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRemoteNames_ReturnsNamesInOrder(t *testing.T) {
+	tomlData := `
+external_drive = "/tmp/test"
+[cloud]
+mode = "copy"
+[[cloud.remotes]]
+name = "gdrive"
+[[cloud.remotes]]
+name = "onedrive"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := cfg.RemoteNames()
+	want := []string{"gdrive", "onedrive"}
+	if len(got) != len(want) {
+		t.Fatalf("RemoteNames() len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("RemoteNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRemoteNames_NilCloud_ReturnsNil(t *testing.T) {
+	tomlData := `
+external_drive = "/tmp/test"
+[[sync]]
+name = "no-cloud"
+sources = ["/tmp/src"]
+destination = "/tmp/dst"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.RemoteNames(); got != nil {
+		t.Errorf("RemoteNames() = %v, want nil when Cloud is nil", got)
+	}
+}
+
+func TestLoad_NoSyncJobs_EmptySlice(t *testing.T) {
+	tomlData := `
+external_drive = "/tmp/drive"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.SyncJobs) != 0 {
+		t.Errorf("SyncJobs len = %d, want 0", len(cfg.SyncJobs))
+	}
+}
+
+func TestLoad_TildeExpansion_CloudAndExternalDrive(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	tomlData := `
+external_drive = "~/Volumes/backup"
+[cloud]
+mode = "sync"
+backup_path = "~/backups/archive"
+[[cloud.items]]
+source = "~/Documents/notes"
+destination = "~/Cloud/notes"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantDrive := filepath.Join(home, "Volumes/backup")
+	if cfg.ExternalDrive != wantDrive {
+		t.Errorf("ExternalDrive = %q, want %q", cfg.ExternalDrive, wantDrive)
+	}
+	wantBackup := filepath.Join(home, "backups/archive")
+	if cfg.Cloud.BackupPath != wantBackup {
+		t.Errorf("Cloud.BackupPath = %q, want %q", cfg.Cloud.BackupPath, wantBackup)
+	}
+	wantSrc := filepath.Join(home, "Documents/notes")
+	if cfg.Cloud.Items[0].Source != wantSrc {
+		t.Errorf("Cloud.Items[0].Source = %q, want %q", cfg.Cloud.Items[0].Source, wantSrc)
+	}
+	wantDst := filepath.Join(home, "Cloud/notes")
+	if cfg.Cloud.Items[0].Destination != wantDst {
+		t.Errorf("Cloud.Items[0].Destination = %q, want %q", cfg.Cloud.Items[0].Destination, wantDst)
+	}
+}

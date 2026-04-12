@@ -161,6 +161,7 @@ func (c *Config) expandPaths() {
 	}
 
 	if c.Cloud != nil {
+		c.Cloud.BackupPath = expandTilde(c.Cloud.BackupPath)
 		for i := range c.Cloud.Items {
 			c.Cloud.Items[i].Source = expandTilde(c.Cloud.Items[i].Source)
 			c.Cloud.Items[i].Destination = expandTilde(c.Cloud.Items[i].Destination)
