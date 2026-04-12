@@ -28,7 +28,10 @@ func TestLogger_WritesToBothStreams(t *testing.T) {
 		t.Errorf("terminal missing message, got: %q", termOut)
 	}
 
-	fileBytes, _ := os.ReadFile(logFile)
+	fileBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
 	fileOut := string(fileBytes)
 	if !strings.Contains(fileOut, "[INFO] hello world") {
 		t.Errorf("log file missing message, got: %q", fileOut)
@@ -48,7 +51,10 @@ func TestLogger_FileOutput_NoAnsiCodes(t *testing.T) {
 
 	logger.Error("something broke")
 
-	fileBytes, _ := os.ReadFile(logFile)
+	fileBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
 	fileOut := string(fileBytes)
 	if strings.Contains(fileOut, "\033[") {
 		t.Errorf("log file contains ANSI codes: %q", fileOut)
@@ -94,12 +100,53 @@ func TestLogger_AllMethods(t *testing.T) {
 	logger.Warn("warn msg")
 	logger.Error("err msg")
 
-	fileBytes, _ := os.ReadFile(logFile)
+	fileBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
 	fileOut := string(fileBytes)
 
 	for _, want := range []string{"==> section", "[INFO] info msg", "[OK] ok msg", "[WARN] warn msg", "[ERROR] err msg"} {
 		if !strings.Contains(fileOut, want) {
 			t.Errorf("log file missing %q", want)
 		}
+	}
+}
+
+func TestNew_CreatesDirectoryAndFile(t *testing.T) {
+	logDir := filepath.Join(t.TempDir(), "nested", "logs")
+	logger, logPath, err := log.New(logDir, false)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer logger.Close()
+
+	if logPath == "" {
+		t.Fatal("logPath is empty")
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("log file not created: %v", err)
+	}
+	// Verify it's writable.
+	logger.Info("test message")
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	if !strings.Contains(string(content), "[INFO] test message") {
+		t.Errorf("log content missing message: %q", string(content))
+	}
+}
+
+func TestLogPath_ReturnsFilePath(t *testing.T) {
+	logDir := t.TempDir()
+	logFile := filepath.Join(logDir, "test.log")
+	logger, err := log.NewWithWriter(&bytes.Buffer{}, logFile, false)
+	if err != nil {
+		t.Fatalf("NewWithWriter: %v", err)
+	}
+	defer logger.Close()
+	if logger.LogPath() != logFile {
+		t.Errorf("LogPath() = %q, want %q", logger.LogPath(), logFile)
 	}
 }
