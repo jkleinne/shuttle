@@ -1,0 +1,163 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func readFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+	if err != nil {
+		t.Fatalf("reading fixture %s: %v", name, err)
+	}
+	return data
+}
+
+func TestParseRsyncStats_UpToDate(t *testing.T) {
+	data := readFixture(t, "rsync_stats_uptodate.txt")
+	stats := ParseRsyncStats(data)
+
+	if stats.FilesChecked != 14101 {
+		t.Errorf("FilesChecked = %d, want 14101", stats.FilesChecked)
+	}
+	if stats.FilesTransferred != 0 {
+		t.Errorf("FilesTransferred = %d, want 0", stats.FilesTransferred)
+	}
+	if stats.FilesDeleted != 0 {
+		t.Errorf("FilesDeleted = %d, want 0", stats.FilesDeleted)
+	}
+	if stats.BytesSent != "666.76K" {
+		t.Errorf("BytesSent = %q, want 666.76K", stats.BytesSent)
+	}
+	if stats.Speed != "444.69K/s" {
+		t.Errorf("Speed = %q, want 444.69K/s", stats.Speed)
+	}
+}
+
+func TestParseRsyncStats_WithTransfers(t *testing.T) {
+	data := readFixture(t, "rsync_stats_transferred.txt")
+	stats := ParseRsyncStats(data)
+
+	if stats.FilesChecked != 250 {
+		t.Errorf("FilesChecked = %d, want 250", stats.FilesChecked)
+	}
+	if stats.FilesTransferred != 8 {
+		t.Errorf("FilesTransferred = %d, want 8", stats.FilesTransferred)
+	}
+	if stats.FilesDeleted != 2 {
+		t.Errorf("FilesDeleted = %d, want 2", stats.FilesDeleted)
+	}
+	if stats.BytesSent != "45.35M" {
+		t.Errorf("BytesSent = %q, want 45.35M", stats.BytesSent)
+	}
+	if stats.Speed != "3.02M/s" {
+		t.Errorf("Speed = %q, want 3.02M/s", stats.Speed)
+	}
+}
+
+func TestParseRcloneStats_UpToDate(t *testing.T) {
+	data := readFixture(t, "rclone_log_uptodate.txt")
+	stats := ParseRcloneStats(data)
+
+	if stats.FilesChecked != 3258 {
+		t.Errorf("FilesChecked = %d, want 3258", stats.FilesChecked)
+	}
+	if stats.FilesTransferred != 0 {
+		t.Errorf("FilesTransferred = %d, want 0", stats.FilesTransferred)
+	}
+	if stats.FilesDeleted != 0 {
+		t.Errorf("FilesDeleted = %d, want 0", stats.FilesDeleted)
+	}
+}
+
+func TestParseRcloneStats_WithTransfers(t *testing.T) {
+	data := readFixture(t, "rclone_log_transferred.txt")
+	stats := ParseRcloneStats(data)
+
+	// FilesChecked = Checks count only (not summed with transferred).
+	// This matches rclone's semantics: "Checks" are server-side comparisons,
+	// "Transferred" are actual data movements. They're reported separately.
+	if stats.FilesChecked != 919 {
+		t.Errorf("FilesChecked = %d, want 919", stats.FilesChecked)
+	}
+	if stats.FilesTransferred != 12 {
+		t.Errorf("FilesTransferred = %d, want 12", stats.FilesTransferred)
+	}
+	if stats.FilesDeleted != 3 {
+		t.Errorf("FilesDeleted = %d, want 3", stats.FilesDeleted)
+	}
+	if stats.BytesSent != "1.082 GiB" {
+		t.Errorf("BytesSent = %q, want 1.082 GiB", stats.BytesSent)
+	}
+	if stats.Speed != "32.709 KiB/s" {
+		t.Errorf("Speed = %q, want 32.709 KiB/s", stats.Speed)
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{38 * time.Second, "38s"},
+		{125 * time.Second, "2m 05s"},
+		{3725 * time.Second, "1h 02m 05s"},
+		{0, "0s"},
+		{59 * time.Second, "59s"},
+		{60 * time.Second, "1m 00s"},
+	}
+	for _, tt := range tests {
+		got := FormatDuration(tt.d)
+		if got != tt.want {
+			t.Errorf("FormatDuration(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestRenderSummary_GroupsByJobName(t *testing.T) {
+	summary := Summary{
+		Jobs: []JobResult{
+			{
+				Name: "manga",
+				Items: []ItemResult{
+					{Name: "Manga Sync", Status: StatusOK, Stats: TransferStats{
+						FilesChecked: 100, Elapsed: 5 * time.Second,
+					}},
+				},
+			},
+			{
+				Name: "cloud:crypt_gdrive",
+				Items: []ItemResult{
+					{Name: "Documents", Status: StatusOK, Stats: TransferStats{
+						FilesChecked: 50, FilesTransferred: 3,
+						BytesSent: "12.3 MiB", Speed: "2.1 MiB/s",
+						Elapsed: 15 * time.Second,
+					}},
+					{Name: "ebooks", Status: StatusNotFound},
+				},
+			},
+		},
+		Duration: 30 * time.Second,
+	}
+
+	var buf strings.Builder
+	RenderSummary(&buf, summary)
+	out := buf.String()
+
+	if !strings.Contains(out, "manga:") {
+		t.Error("missing manga: header")
+	}
+	if !strings.Contains(out, "crypt_gdrive:") {
+		t.Error("missing crypt_gdrive: header")
+	}
+	if !strings.Contains(out, "not found") {
+		t.Error("missing 'not found' for ebooks")
+	}
+	if !strings.Contains(out, "Duration: 30s") {
+		t.Error("missing duration")
+	}
+}

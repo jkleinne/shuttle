@@ -1,0 +1,16 @@
+Number of files: 250 (reg: 230, dir: 20)
+Number of created files: 5 (reg: 3, dir: 2)
+Number of deleted files: 2
+Number of regular files transferred: 8
+Total file size: 1.52G bytes
+Total transferred file size: 45.3M bytes
+Literal data: 45.3M bytes
+Matched data: 0 bytes
+File list size: 4.2K
+File list generation time: 0.001 seconds
+File list transfer time: 0.000 seconds
+Total bytes sent: 45.35M
+Total bytes received: 1.2K
+
+sent 45.35M bytes  received 1.2K bytes  3.02M bytes/sec
+total size is 1.52G  speedup is 33.52
