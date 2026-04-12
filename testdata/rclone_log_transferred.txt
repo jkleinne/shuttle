@@ -1,0 +1,5 @@
+Transferred:   	    1.082 GiB / 1.082 GiB, 100%, 32.709 KiB/s, ETA 0s
+Transferred:            12 / 50, 24%
+Checks:               919 / 919, 100%
+Deleted:                3 (files), 0 (dirs), 156 B (freed)
+Elapsed time:         5.6s

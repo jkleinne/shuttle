@@ -1,0 +1,4 @@
+Transferred:   	          0 B / 0 B, -, 0 B/s, ETA -
+Checks:              3258 / 3258, 100%
+Deleted:                0 (files), 11 (dirs), 0 B (freed)
+Elapsed time:         6.8s
