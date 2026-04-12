@@ -1,0 +1,7 @@
+external_drive = "/tmp/test"
+[cloud]
+mode = "mirror"
+[[cloud.remotes]]
+name = "test"
+[[cloud.items]]
+source = "/tmp/a"

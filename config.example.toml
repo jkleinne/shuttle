@@ -1,0 +1,79 @@
+# Sync-Station Configuration
+# Location: ${XDG_CONFIG_HOME:-~/.config}/sync-station/config.toml
+
+# Mount point of your primary external hard drive.
+external_drive = "/Volumes/Backup"
+
+# -- rsync-based sync jobs, executed in config order --
+
+[[sync]]
+name = "photos"
+sources = ["/tmp/src/photos/"]
+destination = "~/Pictures/Backup/"
+delete = false
+extra_opts = ["--exclude=.*"]
+
+[[sync]]
+name = "projects"
+sources = [
+    "~/Projects/app-one",
+    "~/Projects/app-two",
+    "~/Projects/notes.txt",
+    "~/Projects/app-three",
+    "~/.config/rclone",
+]
+destination = "/Volumes/Backup/Secrets/secrets"
+delete = true
+
+# -- rclone-based cloud sync --
+
+[cloud]
+mode = "sync"                    # "copy" or "sync"
+backup_path = "_archive"         # "" to disable
+backup_retention_days = 365
+remote_path = ""
+
+[cloud.tuning]
+transfers = 6
+checkers = 16
+bwlimit = "10M"
+drive_chunk_size = "64M"
+buffer_size = "64M"
+use_mmap = true
+timeout = "10m"
+contimeout = "90s"
+low_level_retries = 15
+order_by = "modtime,asc"
+
+[[cloud.remotes]]
+name = "my_gdrive"
+
+[[cloud.remotes]]
+name = "my_s3"
+
+[[cloud.items]]
+source = "/tmp/src/ereader"
+
+[[cloud.items]]
+source = "~/Documents"
+
+[[cloud.items]]
+source = "media"
+
+[[cloud.items]]
+source = "audiobooks"
+
+[[cloud.items]]
+source = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics"
+
+[[cloud.items]]
+source = "Music"
+
+[[cloud.items]]
+source = "~/Calibre Library"
+
+[[cloud.items]]
+source = "~/.local/bin"
+
+[[cloud.items]]
+source = "/Volumes/Backup/Collections"
