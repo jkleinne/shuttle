@@ -1,0 +1,79 @@
+# Sync-Station Configuration
+# Location: ${XDG_CONFIG_HOME:-~/.config}/sync-station/config.toml
+
+# Mount point of your primary external hard drive.
+external_drive = "/Volumes/mybook-main"
+
+# -- rsync-based sync jobs, executed in config order --
+
+[[sync]]
+name = "manga"
+sources = ["/Volumes/mybook-main/sync/mangas/"]
+destination = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics/"
+delete = false
+extra_opts = ["--exclude=.*"]
+
+[[sync]]
+name = "secrets"
+sources = [
+    "~/.age",
+    "~/.minisign",
+    "~/.config/chezmoi/chezmoi.toml",
+    "~/Documents/1Password Emergency Kit.pdf",
+    "~/.config/rclone",
+]
+destination = "/Volumes/mybook-main/Secrets/secrets"
+delete = true
+
+# -- rclone-based cloud sync --
+
+[cloud]
+mode = "sync"                    # "copy" or "sync"
+backup_path = "_archive"         # "" to disable
+backup_retention_days = 365
+remote_path = ""
+
+[cloud.tuning]
+transfers = 6
+checkers = 16
+bwlimit = "5.5M"
+drive_chunk_size = "64M"
+buffer_size = "64M"
+use_mmap = true
+timeout = "10m"
+contimeout = "90s"
+low_level_retries = 15
+order_by = "modtime,asc"
+
+[[cloud.remotes]]
+name = "crypt_gdrive"
+
+[[cloud.remotes]]
+name = "crypt_koofr"
+
+[[cloud.items]]
+source = "/Volumes/KOBOeReader/.adds/koreader"
+
+[[cloud.items]]
+source = "~/Documents"
+
+[[cloud.items]]
+source = "ebooks"
+
+[[cloud.items]]
+source = "audiobooks"
+
+[[cloud.items]]
+source = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics"
+
+[[cloud.items]]
+source = "Music"
+
+[[cloud.items]]
+source = "~/Calibre Library"
+
+[[cloud.items]]
+source = "~/.local/bin"
+
+[[cloud.items]]
+source = "/Volumes/mybook-main/Collections"

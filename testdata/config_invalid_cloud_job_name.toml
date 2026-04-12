@@ -1,0 +1,5 @@
+external_drive = "/tmp/test"
+[[sync]]
+name = "cloud"
+sources = ["/tmp/a"]
+destination = "/tmp/b"

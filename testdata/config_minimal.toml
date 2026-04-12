@@ -1,0 +1,6 @@
+external_drive = "/tmp/test-drive"
+
+[[sync]]
+name = "test-job"
+sources = ["/tmp/src"]
+destination = "/tmp/dst"
