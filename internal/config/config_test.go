@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jkleinne/sync-station/internal/config"
@@ -100,6 +101,9 @@ func TestValidate_DuplicateJobNames_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for duplicate job names, got nil")
 	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error %q should mention \"duplicate\"", err.Error())
+	}
 }
 
 func TestValidate_JobNamedCloud_ReturnsError(t *testing.T) {
@@ -107,12 +111,21 @@ func TestValidate_JobNamedCloud_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for job named 'cloud', got nil")
 	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error %q should mention \"reserved\"", err.Error())
+	}
 }
 
 func TestValidate_InvalidMode_ReturnsError(t *testing.T) {
 	_, err := config.LoadFile(testdataPath("config_invalid_mode.toml"))
 	if err == nil {
 		t.Fatal("expected error for invalid cloud mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("error %q should mention \"invalid\"", err.Error())
+	}
+	if !strings.Contains(err.Error(), "mirror") {
+		t.Errorf("error %q should mention the bad mode value \"mirror\"", err.Error())
 	}
 }
 
@@ -129,6 +142,9 @@ source = "/tmp/a"
 	_, err := config.LoadBytes([]byte(tomlData))
 	if err == nil {
 		t.Fatal("expected error for empty remote name, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error %q should mention \"empty\"", err.Error())
 	}
 }
 
@@ -147,6 +163,9 @@ source = "/tmp/a"
 	_, err := config.LoadBytes([]byte(tomlData))
 	if err == nil {
 		t.Fatal("expected error for duplicate remote names, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error %q should mention \"duplicate\"", err.Error())
 	}
 }
 
