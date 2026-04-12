@@ -15,6 +15,13 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// reservedJobName is the sync job name reserved for internal use.
+const reservedJobName = "cloud"
+
+// ModeCopy and ModeSync are the only valid values for CloudConfig.Mode.
+const ModeCopy = "copy"
+const ModeSync = "sync"
+
 // Config is the top-level configuration for sync-station.
 // SyncJobs maps to [[sync]] TOML array-of-tables; Cloud is optional.
 type Config struct {
@@ -89,7 +96,9 @@ func LoadBytes(data []byte) (*Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
-	cfg.expandPaths()
+	if err := cfg.expandPaths(); err != nil {
+		return nil, err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -100,9 +109,16 @@ func LoadBytes(data []byte) (*Config, error) {
 // ${XDG_CONFIG_HOME:-~/.config}/sync-station/config.toml.
 // Returns an empty Config (no jobs, no cloud) if no file exists yet.
 func Load() (*Config, error) {
-	path := configPath()
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return &Config{}, nil
+	path, err := configPath()
+	if err != nil {
+		return nil, err
+	}
+	_, err = os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Config{}, nil
+		}
+		return nil, fmt.Errorf("checking config %s: %w", path, err)
 	}
 	return LoadFile(path)
 }
@@ -130,43 +146,67 @@ func (c *Config) RemoteNames() []string {
 }
 
 // configPath returns the canonical config file path, respecting XDG_CONFIG_HOME.
-func configPath() string {
+// It returns an error if XDG_CONFIG_HOME is unset and os.UserHomeDir fails.
+func configPath() (string, error) {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving home directory: %w", err)
+		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "sync-station", "config.toml")
+	return filepath.Join(dir, "sync-station", "config.toml"), nil
 }
 
 // expandTilde replaces a leading "~" with the user's home directory.
 // Paths that do not start with "~" are returned unchanged.
-func expandTilde(path string) string {
+// Returns an error if the path starts with "~" and os.UserHomeDir fails.
+func expandTilde(path string) (string, error) {
 	if !strings.HasPrefix(path, "~") {
-		return path
+		return path, nil
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, path[1:])
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory for path %q: %w", path, err)
+	}
+	return filepath.Join(home, path[1:]), nil
 }
 
 // expandPaths applies tilde expansion to all path fields in the config.
-func (c *Config) expandPaths() {
-	c.ExternalDrive = expandTilde(c.ExternalDrive)
+// Returns an error if any tilde expansion fails.
+func (c *Config) expandPaths() error {
+	var err error
+	if c.ExternalDrive, err = expandTilde(c.ExternalDrive); err != nil {
+		return err
+	}
 
 	for i := range c.SyncJobs {
 		for j := range c.SyncJobs[i].Sources {
-			c.SyncJobs[i].Sources[j] = expandTilde(c.SyncJobs[i].Sources[j])
+			if c.SyncJobs[i].Sources[j], err = expandTilde(c.SyncJobs[i].Sources[j]); err != nil {
+				return err
+			}
 		}
-		c.SyncJobs[i].Destination = expandTilde(c.SyncJobs[i].Destination)
+		if c.SyncJobs[i].Destination, err = expandTilde(c.SyncJobs[i].Destination); err != nil {
+			return err
+		}
 	}
 
 	if c.Cloud != nil {
-		c.Cloud.BackupPath = expandTilde(c.Cloud.BackupPath)
+		if c.Cloud.BackupPath, err = expandTilde(c.Cloud.BackupPath); err != nil {
+			return err
+		}
 		for i := range c.Cloud.Items {
-			c.Cloud.Items[i].Source = expandTilde(c.Cloud.Items[i].Source)
-			c.Cloud.Items[i].Destination = expandTilde(c.Cloud.Items[i].Destination)
+			if c.Cloud.Items[i].Source, err = expandTilde(c.Cloud.Items[i].Source); err != nil {
+				return err
+			}
+			if c.Cloud.Items[i].Destination, err = expandTilde(c.Cloud.Items[i].Destination); err != nil {
+				return err
+			}
 		}
 	}
+
+	return nil
 }
 
 // validate enforces all structural constraints on the parsed config.
@@ -177,7 +217,7 @@ func (c *Config) validate() error {
 		if job.Name == "" {
 			return fmt.Errorf("sync job has empty name")
 		}
-		if job.Name == "cloud" {
+		if job.Name == reservedJobName {
 			return fmt.Errorf("sync job name %q is reserved", job.Name)
 		}
 		if seen[job.Name] {
@@ -197,8 +237,8 @@ func (c *Config) validate() error {
 		return nil
 	}
 
-	if c.Cloud.Mode != "copy" && c.Cloud.Mode != "sync" {
-		return fmt.Errorf("invalid cloud mode %q: must be \"copy\" or \"sync\"", c.Cloud.Mode)
+	if c.Cloud.Mode != ModeCopy && c.Cloud.Mode != ModeSync {
+		return fmt.Errorf("invalid cloud mode %q: must be %q or %q", c.Cloud.Mode, ModeCopy, ModeSync)
 	}
 
 	remoteNames := make(map[string]bool, len(c.Cloud.Remotes))
