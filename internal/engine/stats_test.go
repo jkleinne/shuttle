@@ -118,6 +118,102 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestSummary_HasErrors_ReturnsFalse_WhenAllOK(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "job1", Items: []ItemResult{{Status: StatusOK}}},
+		},
+	}
+	if s.HasErrors() {
+		t.Error("HasErrors() = true, want false")
+	}
+}
+
+func TestSummary_HasErrors_ReturnsTrue_WhenAnyFailed(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "job1", Items: []ItemResult{{Status: StatusOK}}},
+			{Name: "job2", Items: []ItemResult{{Status: StatusFailed}}},
+		},
+	}
+	if !s.HasErrors() {
+		t.Error("HasErrors() = false, want true")
+	}
+}
+
+func TestFormatItemStats_UpToDate(t *testing.T) {
+	r := ItemResult{Status: StatusOK, Stats: TransferStats{
+		FilesChecked: 100, Elapsed: 5 * time.Second,
+	}}
+	got := FormatItemStats(r)
+	// StatusOK with no transfers renders as "N checked (Ts)".
+	if !strings.Contains(got, "checked") {
+		t.Errorf("expected 'checked', got %q", got)
+	}
+	if strings.Contains(got, "transferred") {
+		t.Errorf("expected no 'transferred' in up-to-date output, got %q", got)
+	}
+}
+
+func TestFormatItemStats_WithTransfers(t *testing.T) {
+	r := ItemResult{Status: StatusOK, Stats: TransferStats{
+		FilesChecked: 50, FilesTransferred: 3, BytesSent: "12.3 MiB",
+		Speed: "2.1 MiB/s", Elapsed: 15 * time.Second,
+	}}
+	got := FormatItemStats(r)
+	if !strings.Contains(got, "3 transferred") {
+		t.Errorf("expected '3 transferred', got %q", got)
+	}
+	if !strings.Contains(got, "12.3 MiB") {
+		t.Errorf("expected bytes, got %q", got)
+	}
+}
+
+func TestFormatItemStats_Failed(t *testing.T) {
+	r := ItemResult{Status: StatusFailed, Stats: TransferStats{
+		FilesTransferred: 1, Elapsed: 3 * time.Second,
+	}}
+	got := FormatItemStats(r)
+	// FormatItemStats returns "[failed]" for StatusFailed.
+	if !strings.Contains(got, "failed") {
+		t.Errorf("expected 'failed', got %q", got)
+	}
+}
+
+func TestFormatItemStats_Skipped(t *testing.T) {
+	r := ItemResult{Status: StatusSkipped}
+	got := FormatItemStats(r)
+	if !strings.Contains(got, "skipped") {
+		t.Errorf("expected 'skipped', got %q", got)
+	}
+}
+
+func TestRenderSummary_DryRunNotice(t *testing.T) {
+	s := Summary{DryRun: true, Duration: 1 * time.Second}
+	var buf strings.Builder
+	RenderSummary(&buf, s)
+	// RenderSummary prepends "[DRY RUN]" when DryRun is true.
+	if !strings.Contains(buf.String(), "DRY RUN") {
+		t.Errorf("expected dry run notice, got %q", buf.String())
+	}
+}
+
+func TestRenderSummary_ErrorSection(t *testing.T) {
+	s := Summary{
+		Errors:   []string{"manga/source1", "cloud:gdrive/docs"},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s)
+	out := buf.String()
+	if !strings.Contains(out, "Errors") {
+		t.Errorf("expected Errors section, got %q", out)
+	}
+	if !strings.Contains(out, "manga/source1") {
+		t.Errorf("expected error detail, got %q", out)
+	}
+}
+
 func TestRenderSummary_GroupsByJobName(t *testing.T) {
 	summary := Summary{
 		Jobs: []JobResult{
