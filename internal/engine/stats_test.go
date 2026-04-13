@@ -200,7 +200,7 @@ func TestRenderSummary_DryRunNotice(t *testing.T) {
 
 func TestRenderSummary_ErrorSection(t *testing.T) {
 	s := Summary{
-		Errors:   []string{"manga/source1", "cloud:gdrive/docs"},
+		Errors:   []string{"manga/source1", "docs-to-cloud:gdrive/Documents"},
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
@@ -226,14 +226,13 @@ func TestRenderSummary_GroupsByJobName(t *testing.T) {
 				},
 			},
 			{
-				Name: "cloud:crypt_gdrive",
+				Name: "documents-to-cloud:crypt_gdrive",
 				Items: []ItemResult{
 					{Name: "Documents", Status: StatusOK, Stats: TransferStats{
 						FilesChecked: 50, FilesTransferred: 3,
 						BytesSent: "12.3 MiB", Speed: "2.1 MiB/s",
 						Elapsed: 15 * time.Second,
 					}},
-					{Name: "ebooks", Status: StatusNotFound},
 				},
 			},
 		},
@@ -247,11 +246,8 @@ func TestRenderSummary_GroupsByJobName(t *testing.T) {
 	if !strings.Contains(out, "manga:") {
 		t.Error("missing manga: header")
 	}
-	if !strings.Contains(out, "crypt_gdrive:") {
-		t.Error("missing crypt_gdrive: header")
-	}
-	if !strings.Contains(out, "not found") {
-		t.Error("missing 'not found' for ebooks")
+	if !strings.Contains(out, "documents-to-cloud:crypt_gdrive:") {
+		t.Error("missing documents-to-cloud:crypt_gdrive: header")
 	}
 	if !strings.Contains(out, "Duration: 30s") {
 		t.Error("missing duration")

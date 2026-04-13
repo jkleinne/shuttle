@@ -322,13 +322,7 @@ func RenderSummary(w io.Writer, s Summary) {
 	}
 	fmt.Fprintln(w, "=== Sync Summary ===")
 	for _, job := range s.Jobs {
-		// Strip the "cloud:" prefix from the job header so that
-		// "cloud:crypt_gdrive" prints as "crypt_gdrive:".
-		header := job.Name
-		if after, ok := strings.CutPrefix(header, "cloud:"); ok {
-			header = after
-		}
-		fmt.Fprintf(w, "%s:\n", header)
+		fmt.Fprintf(w, "%s:\n", job.Name)
 		for _, item := range job.Items {
 			fmt.Fprintf(w, "  %s: %s\n", item.Name, FormatItemStats(item))
 		}
