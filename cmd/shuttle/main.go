@@ -35,7 +35,7 @@ func run() int {
 		Short: "Automated backup and synchronization tool",
 		// No subcommand: delegate to executeRun so `shuttle --dry-run` works.
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts, args)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -45,7 +45,7 @@ func run() int {
 		Use:   "run",
 		Short: "Execute sync tasks (default when no subcommand given)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts, args)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -106,11 +106,10 @@ var errPartialFailure = fmt.Errorf("one or more tasks failed")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
 // rclone config password, then runs the full sync pipeline.
-func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.RunOptions, trailingArgs []string) error {
+func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.RunOptions) error {
 	opts.SkipJobs = skip
 	opts.OnlyJobs = only
 	opts.SelectedRemotes = remotes
-	opts.RcloneOverrides = trailingArgs
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -121,7 +120,12 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 		return err
 	}
 
-	if err := validateRemoteNames(opts.SelectedRemotes, cfg.RemoteNames()); err != nil {
+	if err := validateRemoteNames(opts.SelectedRemotes, cfg.AllRemoteNames()); err != nil {
+		return err
+	}
+
+	configPath, err := config.ConfigPath()
+	if err != nil {
 		return err
 	}
 
@@ -140,7 +144,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 
 	promptForPassword(logger)
 
-	runner := engine.NewRunner(cfg, logger, opts.DryRun, logPath)
+	runner := engine.NewRunner(cfg, configPath, logger, opts.DryRun, logPath)
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
 		return err
@@ -156,7 +160,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 }
 
 // validateRemoteNames returns an error when any selected remote is not present
-// in the configured remote list. A nil or empty selection is always valid.
+// in the union of all rclone jobs' remote names. A nil or empty selection is always valid.
 func validateRemoteNames(selected, configured []string) error {
 	if len(selected) == 0 {
 		return nil

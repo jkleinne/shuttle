@@ -1,6 +1,5 @@
-external_drive = "/tmp/test-drive"
-
-[[sync]]
+[[job]]
 name = "test-job"
+engine = "rsync"
 sources = ["/tmp/src"]
 destination = "/tmp/dst"

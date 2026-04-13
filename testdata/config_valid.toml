@@ -1,39 +1,9 @@
-# Shuttle Configuration
-# Location: ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml
+[defaults.rsync]
+flags = ["-a", "-v", "-h", "-P"]
 
-# Mount point of your primary external hard drive.
-external_drive = "/Volumes/mybook-main"
-
-# -- rsync-based sync jobs, executed in config order --
-
-[[sync]]
-name = "manga"
-sources = ["/Volumes/mybook-main/sync/mangas/"]
-destination = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics/"
-delete = false
-extra_opts = ["--exclude=.*"]
-
-[[sync]]
-name = "secrets"
-sources = [
-    "~/.age",
-    "~/.minisign",
-    "~/.config/chezmoi/chezmoi.toml",
-    "~/Documents/1Password Emergency Kit.pdf",
-    "~/.config/rclone",
-]
-destination = "/Volumes/mybook-main/Secrets/secrets"
-delete = true
-
-# -- rclone-based cloud sync --
-
-[cloud]
-mode = "sync"                    # "copy" or "sync"
-backup_path = "_archive"         # "" to disable
-backup_retention_days = 365
-remote_path = ""
-
-[cloud.tuning]
+[defaults.rclone]
+flags = ["--copy-links", "--fast-list"]
+filter_file = "~/.config/rclone/filters.txt"
 transfers = 6
 checkers = 16
 bwlimit = "5.5M"
@@ -45,35 +15,38 @@ contimeout = "90s"
 low_level_retries = 15
 order_by = "modtime,asc"
 
-[[cloud.remotes]]
-name = "crypt_gdrive"
+[[job]]
+name = "manga"
+engine = "rsync"
+sources = ["/tmp/src/mangas/"]
+destination = "~/Comics/"
+delete = false
+extra_flags = ["--exclude=.*"]
 
-[[cloud.remotes]]
-name = "crypt_koofr"
+[[job]]
+name = "secrets"
+engine = "rsync"
+sources = [
+    "~/.age",
+    "~/.minisign",
+    "~/.config/chezmoi/chezmoi.toml",
+]
+destination = "/tmp/dst/secrets"
+delete = true
 
-[[cloud.items]]
-source = "/Volumes/KOBOeReader/.adds/koreader"
-
-[[cloud.items]]
+[[job]]
+name = "documents-to-cloud"
+engine = "rclone"
 source = "~/Documents"
+remotes = ["crypt_gdrive", "crypt_koofr"]
+mode = "sync"
+backup_path = "_archive"
+backup_retention_days = 365
 
-[[cloud.items]]
-source = "ebooks"
-
-[[cloud.items]]
-source = "audiobooks"
-
-[[cloud.items]]
-source = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics"
-
-[[cloud.items]]
-source = "Music"
-
-[[cloud.items]]
-source = "~/Calibre Library"
-
-[[cloud.items]]
-source = "~/.local/bin"
-
-[[cloud.items]]
-source = "/Volumes/mybook-main/Collections"
+[[job]]
+name = "music-to-cloud"
+engine = "rclone"
+source = "/tmp/src/Music"
+remotes = ["crypt_gdrive"]
+mode = "copy"
+bwlimit = "2M"
