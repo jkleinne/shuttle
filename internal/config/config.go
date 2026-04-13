@@ -15,46 +15,75 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
-// reservedJobName is the sync job name reserved for internal use.
-const reservedJobName = "cloud"
+// Engine constants for Job.Engine field.
+const (
+	EngineRsync  = "rsync"
+	EngineRclone = "rclone"
+)
 
-// ModeCopy and ModeSync are the only valid values for CloudConfig.Mode.
-const ModeCopy = "copy"
-const ModeSync = "sync"
+// ModeCopy and ModeSync are the valid values for rclone Job.Mode.
+const (
+	ModeCopy = "copy"
+	ModeSync = "sync"
+)
 
 // Config is the top-level configuration for shuttle.
-// SyncJobs maps to [[sync]] TOML array-of-tables; Cloud is optional.
 type Config struct {
-	ExternalDrive string      `toml:"external_drive"`
-	SyncJobs      []SyncJob   `toml:"sync"`
-	Cloud         *CloudConfig `toml:"cloud"`
+	Defaults *Defaults `toml:"defaults"`
+	Jobs     []Job     `toml:"job"`
 }
 
-// SyncJob defines an rsync-based local sync operation.
-// Delete controls whether rsync uses --delete; ExtraOpts are appended verbatim.
-type SyncJob struct {
-	Name        string   `toml:"name"`
+// Defaults holds baseline configuration for each engine.
+// Per-job fields override these values.
+type Defaults struct {
+	Rsync  *RsyncDefaults  `toml:"rsync"`
+	Rclone *RcloneDefaults `toml:"rclone"`
+}
+
+// RsyncDefaults holds default flags for all rsync jobs.
+type RsyncDefaults struct {
+	Flags []string `toml:"flags"`
+}
+
+// RcloneDefaults holds default flags and tuning for all rclone jobs.
+type RcloneDefaults struct {
+	Flags           []string `toml:"flags"`
+	FilterFile      string   `toml:"filter_file"`
+	Transfers       int      `toml:"transfers"`
+	Checkers        int      `toml:"checkers"`
+	Bwlimit         string   `toml:"bwlimit"`
+	DriveChunkSize  string   `toml:"drive_chunk_size"`
+	BufferSize      string   `toml:"buffer_size"`
+	UseMmap         bool     `toml:"use_mmap"`
+	Timeout         string   `toml:"timeout"`
+	Contimeout      string   `toml:"contimeout"`
+	LowLevelRetries int      `toml:"low_level_retries"`
+	OrderBy         string   `toml:"order_by"`
+}
+
+// Job defines a single backup/sync operation. The Engine field determines
+// which fields are relevant: rsync jobs use Sources/Destination/Delete,
+// rclone jobs use Source/Remotes/Mode and tuning overrides.
+type Job struct {
+	// Common fields
+	Name       string   `toml:"name"`
+	Engine     string   `toml:"engine"`
+	ExtraFlags []string `toml:"extra_flags"`
+
+	// Rsync fields
 	Sources     []string `toml:"sources"`
 	Destination string   `toml:"destination"`
 	Delete      bool     `toml:"delete"`
-	ExtraOpts   []string `toml:"extra_opts"`
-}
 
-// CloudConfig holds all rclone cloud sync configuration.
-// Mode must be "copy" or "sync". BackupPath of "" disables backup archiving.
-type CloudConfig struct {
-	Mode                string      `toml:"mode"`
-	BackupPath          string      `toml:"backup_path"`
-	BackupRetentionDays int         `toml:"backup_retention_days"`
-	RemotePath          string      `toml:"remote_path"`
-	Tuning              CloudTuning `toml:"tuning"`
-	Remotes             []Remote    `toml:"remotes"`
-	Items               []CloudItem `toml:"items"`
-}
+	// Rclone fields
+	Source              string   `toml:"source"`
+	Remotes             []string `toml:"remotes"`
+	Mode                string   `toml:"mode"`
+	BackupPath          string   `toml:"backup_path"`
+	BackupRetentionDays int      `toml:"backup_retention_days"`
+	FilterFile          string   `toml:"filter_file"`
 
-// CloudTuning holds rclone performance tuning parameters.
-// All string fields (Bwlimit, DriveChunkSize, etc.) are passed directly to rclone flags.
-type CloudTuning struct {
+	// Rclone per-job tuning overrides
 	Transfers       int    `toml:"transfers"`
 	Checkers        int    `toml:"checkers"`
 	Bwlimit         string `toml:"bwlimit"`
@@ -65,18 +94,6 @@ type CloudTuning struct {
 	Contimeout      string `toml:"contimeout"`
 	LowLevelRetries int    `toml:"low_level_retries"`
 	OrderBy         string `toml:"order_by"`
-}
-
-// Remote identifies a configured rclone remote by name.
-type Remote struct {
-	Name string `toml:"name"`
-}
-
-// CloudItem defines a source path to upload to all configured cloud remotes.
-// Destination is optional; when empty the runner derives it from the source basename.
-type CloudItem struct {
-	Source      string `toml:"source"`
-	Destination string `toml:"destination"`
 }
 
 // LoadFile reads and parses a TOML config file from disk.
@@ -107,9 +124,9 @@ func LoadBytes(data []byte) (*Config, error) {
 
 // Load finds and loads the config from the XDG config path:
 // ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml.
-// Returns an empty Config (no jobs, no cloud) if no file exists yet.
+// Returns an empty Config (no jobs) if no file exists yet.
 func Load() (*Config, error) {
-	path, err := configPath()
+	path, err := ConfigPath()
 	if err != nil {
 		return nil, err
 	}
@@ -123,31 +140,37 @@ func Load() (*Config, error) {
 	return LoadFile(path)
 }
 
-// JobNames returns the names of all configured sync jobs in config order.
+// JobNames returns the names of all configured jobs in config order.
 func (c *Config) JobNames() []string {
-	names := make([]string, len(c.SyncJobs))
-	for i, job := range c.SyncJobs {
+	names := make([]string, len(c.Jobs))
+	for i, job := range c.Jobs {
 		names[i] = job.Name
 	}
 	return names
 }
 
-// RemoteNames returns the names of all configured cloud remotes, or nil if
-// no [cloud] section is present.
-func (c *Config) RemoteNames() []string {
-	if c.Cloud == nil {
-		return nil
-	}
-	names := make([]string, len(c.Cloud.Remotes))
-	for i, r := range c.Cloud.Remotes {
-		names[i] = r.Name
+// AllRemoteNames returns the deduplicated union of all rclone jobs'
+// remote names, in first-seen order. Returns nil if no rclone jobs exist.
+func (c *Config) AllRemoteNames() []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, job := range c.Jobs {
+		if job.Engine != EngineRclone {
+			continue
+		}
+		for _, r := range job.Remotes {
+			if !seen[r] {
+				seen[r] = true
+				names = append(names, r)
+			}
+		}
 	}
 	return names
 }
 
-// configPath returns the canonical config file path, respecting XDG_CONFIG_HOME.
-// It returns an error if XDG_CONFIG_HOME is unset and os.UserHomeDir fails.
-func configPath() (string, error) {
+// ConfigPath returns the canonical config file path, respecting XDG_CONFIG_HOME.
+// Exported so the CLI can pass it to the runner for per-config locking.
+func ConfigPath() (string, error) {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -177,32 +200,35 @@ func expandTilde(path string) (string, error) {
 // Returns an error if any tilde expansion fails.
 func (c *Config) expandPaths() error {
 	var err error
-	if c.ExternalDrive, err = expandTilde(c.ExternalDrive); err != nil {
-		return err
-	}
 
-	for i := range c.SyncJobs {
-		for j := range c.SyncJobs[i].Sources {
-			if c.SyncJobs[i].Sources[j], err = expandTilde(c.SyncJobs[i].Sources[j]); err != nil {
+	if c.Defaults != nil {
+		if c.Defaults.Rclone != nil {
+			if c.Defaults.Rclone.FilterFile, err = expandTilde(c.Defaults.Rclone.FilterFile); err != nil {
 				return err
 			}
-		}
-		if c.SyncJobs[i].Destination, err = expandTilde(c.SyncJobs[i].Destination); err != nil {
-			return err
 		}
 	}
 
-	if c.Cloud != nil {
-		if c.Cloud.BackupPath, err = expandTilde(c.Cloud.BackupPath); err != nil {
+	for i := range c.Jobs {
+		job := &c.Jobs[i]
+		// Rsync paths
+		for j := range job.Sources {
+			if job.Sources[j], err = expandTilde(job.Sources[j]); err != nil {
+				return err
+			}
+		}
+		if job.Destination, err = expandTilde(job.Destination); err != nil {
 			return err
 		}
-		for i := range c.Cloud.Items {
-			if c.Cloud.Items[i].Source, err = expandTilde(c.Cloud.Items[i].Source); err != nil {
-				return err
-			}
-			if c.Cloud.Items[i].Destination, err = expandTilde(c.Cloud.Items[i].Destination); err != nil {
-				return err
-			}
+		// Rclone paths
+		if job.Source, err = expandTilde(job.Source); err != nil {
+			return err
+		}
+		if job.BackupPath, err = expandTilde(job.BackupPath); err != nil {
+			return err
+		}
+		if job.FilterFile, err = expandTilde(job.FilterFile); err != nil {
+			return err
 		}
 	}
 
@@ -212,45 +238,60 @@ func (c *Config) expandPaths() error {
 // validate enforces all structural constraints on the parsed config.
 // It returns the first violation encountered, with enough context to act on it.
 func (c *Config) validate() error {
-	seen := make(map[string]bool, len(c.SyncJobs))
-	for _, job := range c.SyncJobs {
+	seen := make(map[string]bool, len(c.Jobs))
+	for _, job := range c.Jobs {
 		if job.Name == "" {
-			return fmt.Errorf("sync job has empty name")
-		}
-		if job.Name == reservedJobName {
-			return fmt.Errorf("sync job name %q is reserved", job.Name)
+			return fmt.Errorf("job has empty name")
 		}
 		if seen[job.Name] {
-			return fmt.Errorf("duplicate sync job name %q", job.Name)
+			return fmt.Errorf("duplicate job name %q", job.Name)
 		}
 		seen[job.Name] = true
 
-		if len(job.Sources) == 0 {
-			return fmt.Errorf("sync job %q has no sources", job.Name)
-		}
-		if job.Destination == "" {
-			return fmt.Errorf("sync job %q has empty destination", job.Name)
+		switch job.Engine {
+		case EngineRsync:
+			if err := validateRsyncJob(job); err != nil {
+				return err
+			}
+		case EngineRclone:
+			if err := validateRcloneJob(job); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("job %q: invalid engine %q, must be %q or %q",
+				job.Name, job.Engine, EngineRsync, EngineRclone)
 		}
 	}
+	return nil
+}
 
-	if c.Cloud == nil {
-		return nil
+func validateRsyncJob(job Job) error {
+	if len(job.Sources) == 0 {
+		return fmt.Errorf("job %q: no sources", job.Name)
 	}
-
-	if c.Cloud.Mode != ModeCopy && c.Cloud.Mode != ModeSync {
-		return fmt.Errorf("invalid cloud mode %q: must be %q or %q", c.Cloud.Mode, ModeCopy, ModeSync)
+	if job.Destination == "" {
+		return fmt.Errorf("job %q: empty destination", job.Name)
 	}
+	return nil
+}
 
-	remoteNames := make(map[string]bool, len(c.Cloud.Remotes))
-	for _, r := range c.Cloud.Remotes {
-		if r.Name == "" {
-			return fmt.Errorf("cloud remote has empty name")
+func validateRcloneJob(job Job) error {
+	if job.Source == "" {
+		return fmt.Errorf("job %q: empty source", job.Name)
+	}
+	if len(job.Remotes) == 0 {
+		return fmt.Errorf("job %q: no remotes", job.Name)
+	}
+	if job.Mode != ModeCopy && job.Mode != ModeSync {
+		return fmt.Errorf("job %q: invalid mode %q, must be %q or %q",
+			job.Name, job.Mode, ModeCopy, ModeSync)
+	}
+	remoteSeen := make(map[string]bool, len(job.Remotes))
+	for _, r := range job.Remotes {
+		if remoteSeen[r] {
+			return fmt.Errorf("job %q: duplicate remote %q", job.Name, r)
 		}
-		if remoteNames[r.Name] {
-			return fmt.Errorf("duplicate cloud remote name %q", r.Name)
-		}
-		remoteNames[r.Name] = true
+		remoteSeen[r] = true
 	}
-
 	return nil
 }
