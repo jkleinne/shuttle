@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-func TestExpandPath_Directory(t *testing.T) {
+func TestStatPath_Directory(t *testing.T) {
 	dir := t.TempDir()
-	resolved, isDir, err := expandPath(dir)
+	resolved, isDir, err := statPath(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -20,12 +20,12 @@ func TestExpandPath_Directory(t *testing.T) {
 	}
 }
 
-func TestExpandPath_File(t *testing.T) {
+func TestStatPath_File(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "test.txt")
 	os.WriteFile(f, []byte("hello"), 0o644)
 
-	resolved, isDir, err := expandPath(f)
+	resolved, isDir, err := statPath(f)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,8 +37,8 @@ func TestExpandPath_File(t *testing.T) {
 	}
 }
 
-func TestExpandPath_NotFound(t *testing.T) {
-	_, _, err := expandPath("/nonexistent/path/that/does/not/exist")
+func TestStatPath_NotFound(t *testing.T) {
+	_, _, err := statPath("/nonexistent/path/that/does/not/exist")
 	if err == nil {
 		t.Fatal("expected error for non-existent path, got nil")
 	}
