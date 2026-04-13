@@ -1,5 +1,5 @@
-# Sync-Station Configuration
-# Location: ${XDG_CONFIG_HOME:-~/.config}/sync-station/config.toml
+# Shuttle Configuration
+# Location: ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml
 
 # Mount point of your primary external hard drive.
 external_drive = "/Volumes/mybook-main"
