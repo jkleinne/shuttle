@@ -15,7 +15,7 @@ import (
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
-const lockFilePath = "/tmp/sync-station.lock"
+const lockFilePath = "/tmp/shuttle.lock"
 
 // RunOptions holds the CLI flags that control a sync run.
 type RunOptions struct {
