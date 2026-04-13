@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -47,10 +46,24 @@ type ItemResult struct {
 }
 
 // JobResult groups the item-level outcomes for a named sync job or cloud remote.
+// The runner guarantees that Items always contains at least one element.
 type JobResult struct {
-	// Name is the sync job name (e.g. "manga") or "cloud:remote_name".
-	Name  string
-	Items []ItemResult
+	// Name is the sync job name from the config (e.g. "manga", "docs-to-cloud").
+	Name string
+	// Remote is the rclone remote name for cloud jobs (e.g. "crypt_gdrive").
+	// Empty for rsync jobs.
+	Remote string
+	Items  []ItemResult
+}
+
+// jobLabel returns a display-friendly identifier for a job result.
+// For rclone jobs with a remote, it returns "name:remote".
+// For rsync jobs (remote is empty), it returns just the name.
+func jobLabel(name, remote string) string {
+	if remote != "" {
+		return name + ":" + remote
+	}
+	return name
 }
 
 // Summary is the top-level result returned after a full sync run.
@@ -274,63 +287,5 @@ func FormatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm %02ds", minutes, seconds)
 	default:
 		return fmt.Sprintf("%ds", seconds)
-	}
-}
-
-// FormatItemStats returns a single-line summary string for a completed item.
-// The format varies by status:
-//   - ok with transfers:  "N checked, M transferred, B sent at S (Ts)"
-//   - ok without transfers: "N checked (Ts)"
-//   - failed: "[failed]"
-//   - skipped: "[skipped]"
-//   - not_found: "[not found]"
-func FormatItemStats(r ItemResult) string {
-	switch r.Status {
-	case StatusFailed:
-		return "[failed]"
-	case StatusSkipped:
-		return "[skipped]"
-	case StatusNotFound:
-		return "[not found]"
-	}
-	// StatusOK
-	s := r.Stats
-	if s.FilesTransferred > 0 {
-		return fmt.Sprintf("%d checked, %d transferred, %s sent at %s (%s)",
-			s.FilesChecked, s.FilesTransferred, s.BytesSent, s.Speed, FormatDuration(s.Elapsed))
-	}
-	return fmt.Sprintf("%d checked (%s)", s.FilesChecked, FormatDuration(s.Elapsed))
-}
-
-// RenderSummary writes a grouped, human-readable run summary to w.
-//
-// Output format:
-//
-//	=== Sync Summary ===
-//	manga:
-//	  mangas: 100 checked (5s)
-//	documents-to-cloud:crypt_gdrive:
-//	  Documents: 50 checked, 3 transferred, 12.3 MiB sent at 2.1 MiB/s (15s)
-//	Duration: 30s
-//
-// A "DRY RUN" notice is prepended when Summary.DryRun is true.
-// Failed items are listed in a trailing "Errors:" section when present.
-func RenderSummary(w io.Writer, s Summary) {
-	if s.DryRun {
-		fmt.Fprintln(w, "[DRY RUN]")
-	}
-	fmt.Fprintln(w, "=== Sync Summary ===")
-	for _, job := range s.Jobs {
-		fmt.Fprintf(w, "%s:\n", job.Name)
-		for _, item := range job.Items {
-			fmt.Fprintf(w, "  %s: %s\n", item.Name, FormatItemStats(item))
-		}
-	}
-	fmt.Fprintf(w, "Duration: %s\n", FormatDuration(s.Duration))
-	if len(s.Errors) > 0 {
-		fmt.Fprintln(w, "Errors:")
-		for _, e := range s.Errors {
-			fmt.Fprintf(w, "  - %s\n", e)
-		}
 	}
 }

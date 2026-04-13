@@ -116,7 +116,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	for _, j := range jobs {
 		for _, item := range j.Items {
 			if item.Status == StatusFailed {
-				summary.Errors = append(summary.Errors, fmt.Sprintf("%s/%s", j.Name, item.Name))
+				summary.Errors = append(summary.Errors, fmt.Sprintf("%s/%s", jobLabel(j.Name, j.Remote), item.Name))
 			}
 		}
 	}
@@ -174,7 +174,8 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 		if err != nil {
 			r.logger.Error(fmt.Sprintf("Skipping %s: %v", source, err))
 			return JobResult{
-				Name: job.Name + ":" + remoteName,
+				Name:   job.Name,
+				Remote: remoteName,
 				Items: []ItemResult{{
 					Name:   filepath.Base(source),
 					Status: StatusNotFound,
@@ -212,7 +213,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 		result.Name = "(prefix root)"
 	}
 
-	return JobResult{Name: job.Name + ":" + remoteName, Items: []ItemResult{result}}
+	return JobResult{Name: job.Name, Remote: remoteName, Items: []ItemResult{result}}
 }
 
 // collectRsyncUserFlags gathers all user-provided flags for rsync conflict detection.
