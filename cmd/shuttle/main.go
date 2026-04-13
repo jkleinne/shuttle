@@ -150,7 +150,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 		return err
 	}
 
-	engine.RenderSummary(os.Stdout, summary)
+	engine.RenderSummary(os.Stdout, summary, useColor)
 	fmt.Printf("\nLog: %s\n", logPath)
 
 	if summary.HasErrors() {
