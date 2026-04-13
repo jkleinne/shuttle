@@ -1,5 +1,5 @@
 // Package config handles TOML configuration loading and validation
-// for sync-station. It exposes Load, LoadFile, and LoadBytes as the
+// for shuttle. It exposes Load, LoadFile, and LoadBytes as the
 // public API so callers never need to touch the TOML library directly.
 //
 // Path expansion (tilde to home directory) is applied to all path fields
@@ -22,7 +22,7 @@ const reservedJobName = "cloud"
 const ModeCopy = "copy"
 const ModeSync = "sync"
 
-// Config is the top-level configuration for sync-station.
+// Config is the top-level configuration for shuttle.
 // SyncJobs maps to [[sync]] TOML array-of-tables; Cloud is optional.
 type Config struct {
 	ExternalDrive string      `toml:"external_drive"`
@@ -106,7 +106,7 @@ func LoadBytes(data []byte) (*Config, error) {
 }
 
 // Load finds and loads the config from the XDG config path:
-// ${XDG_CONFIG_HOME:-~/.config}/sync-station/config.toml.
+// ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml.
 // Returns an empty Config (no jobs, no cloud) if no file exists yet.
 func Load() (*Config, error) {
 	path, err := configPath()
@@ -156,7 +156,7 @@ func configPath() (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(dir, "sync-station", "config.toml"), nil
+	return filepath.Join(dir, "shuttle", "config.toml"), nil
 }
 
 // expandTilde replaces a leading "~" with the user's home directory.

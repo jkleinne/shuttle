@@ -171,7 +171,7 @@ source = "/tmp/a"
 
 func TestLoad_XDGConfigHome_ResolvesPath(t *testing.T) {
 	tmpDir := t.TempDir()
-	confDir := filepath.Join(tmpDir, "sync-station")
+	confDir := filepath.Join(tmpDir, "shuttle")
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		t.Fatalf("creating config dir: %v", err)
 	}

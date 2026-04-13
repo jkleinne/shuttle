@@ -31,9 +31,9 @@ func run() int {
 	var skipJobs, onlyJobs, selectedRemotes []string
 
 	rootCmd := &cobra.Command{
-		Use:   "sync-station",
+		Use:   "shuttle",
 		Short: "Automated backup and synchronization tool",
-		// No subcommand: delegate to executeRun so `sync-station --dry-run` works.
+		// No subcommand: delegate to executeRun so `shuttle --dry-run` works.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts, args)
 		},
@@ -55,12 +55,12 @@ func run() int {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("sync-station %s\n", version)
+			fmt.Printf("shuttle %s\n", version)
 		},
 	}
 
 	// Register the same flags on both root and run so both invocation styles
-	// (`sync-station --dry-run` and `sync-station run --dry-run`) accept them.
+	// (`shuttle --dry-run` and `shuttle run --dry-run`) accept them.
 	for _, cmd := range []*cobra.Command{rootCmd, runCmd} {
 		cmd.Flags().BoolVarP(&runOpts.DryRun, "dry-run", "n", false, "Preview changes without modifying files")
 		cmd.Flags().StringArrayVar(&skipJobs, "skip", nil, "Skip a job by name (repeatable; mutually exclusive with --only)")
@@ -133,7 +133,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 	}
 	defer logger.Close()
 
-	logger.Header("Sync-Station Started")
+	logger.Header("Shuttle Started")
 	if opts.DryRun {
 		logger.Warn("DRY RUN: no files will be modified.")
 	}
@@ -201,5 +201,5 @@ func logDirectory() string {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "sync-station", "logs")
+	return filepath.Join(dir, "shuttle", "logs")
 }
