@@ -44,8 +44,8 @@ func TestLoad_ValidConfig_ParsesAllFields(t *testing.T) {
 	if cfg.Jobs[0].Name != "photos" {
 		t.Errorf("Jobs[0].Name = %q, want photos", cfg.Jobs[0].Name)
 	}
-	if cfg.Jobs[0].Engine != "rsync" {
-		t.Errorf("Jobs[0].Engine = %q, want rsync", cfg.Jobs[0].Engine)
+	if cfg.Jobs[0].Engine != config.EngineRsync {
+		t.Errorf("Jobs[0].Engine = %q, want %s", cfg.Jobs[0].Engine, config.EngineRsync)
 	}
 	if cfg.Jobs[0].Delete {
 		t.Error("Jobs[0].Delete = true, want false")
@@ -55,11 +55,11 @@ func TestLoad_ValidConfig_ParsesAllFields(t *testing.T) {
 	}
 
 	// Rclone job fields
-	if cfg.Jobs[2].Engine != "rclone" {
-		t.Errorf("Jobs[2].Engine = %q, want rclone", cfg.Jobs[2].Engine)
+	if cfg.Jobs[2].Engine != config.EngineRclone {
+		t.Errorf("Jobs[2].Engine = %q, want %s", cfg.Jobs[2].Engine, config.EngineRclone)
 	}
-	if cfg.Jobs[2].Mode != "sync" {
-		t.Errorf("Jobs[2].Mode = %q, want sync", cfg.Jobs[2].Mode)
+	if cfg.Jobs[2].Mode != config.ModeSync {
+		t.Errorf("Jobs[2].Mode = %q, want %s", cfg.Jobs[2].Mode, config.ModeSync)
 	}
 	if len(cfg.Jobs[2].Remotes) != 2 {
 		t.Errorf("Jobs[2].Remotes len = %d, want 2", len(cfg.Jobs[2].Remotes))
@@ -234,6 +234,59 @@ mode = "copy"
 	}
 }
 
+func TestValidate_RcloneEmptyRemoteName_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "empty-remote"
+engine = "rclone"
+source = "/tmp/a"
+remotes = ["gdrive", ""]
+mode = "copy"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for empty remote name, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error %q should mention \"empty\"", err.Error())
+	}
+}
+
+func TestValidate_RcloneEmptySource_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "no-src"
+engine = "rclone"
+source = ""
+remotes = ["test"]
+mode = "copy"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for empty source, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty source") {
+		t.Errorf("error %q should mention \"empty source\"", err.Error())
+	}
+}
+
+func TestValidate_RsyncEmptyDestination_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "no-dst"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = ""
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for empty destination, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty destination") {
+		t.Errorf("error %q should mention \"empty destination\"", err.Error())
+	}
+}
+
 func TestValidate_RcloneDuplicateRemotes_ReturnsError(t *testing.T) {
 	tomlData := `
 [[job]]
@@ -303,14 +356,14 @@ mode = "copy"
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := cfg.AllRemoteNames()
-	// Should be deduplicated: gdrive, koofr, onedrive (order: first-seen)
-	if len(got) != 3 {
-		t.Fatalf("AllRemoteNames() len = %d, want 3", len(got))
+	// Deduplicated, first-seen order: gdrive, koofr, onedrive
+	want := []string{"gdrive", "koofr", "onedrive"}
+	if len(got) != len(want) {
+		t.Fatalf("AllRemoteNames() len = %d, want %d", len(got), len(want))
 	}
-	want := map[string]bool{"gdrive": true, "koofr": true, "onedrive": true}
-	for _, name := range got {
-		if !want[name] {
-			t.Errorf("unexpected remote name %q", name)
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("AllRemoteNames()[%d] = %q, want %q", i, got[i], name)
 		}
 	}
 }

@@ -288,6 +288,9 @@ func validateRcloneJob(job Job) error {
 	}
 	remoteSeen := make(map[string]bool, len(job.Remotes))
 	for _, r := range job.Remotes {
+		if r == "" {
+			return fmt.Errorf("job %q: remote name must not be empty", job.Name)
+		}
 		if remoteSeen[r] {
 			return fmt.Errorf("job %q: duplicate remote %q", job.Name, r)
 		}
