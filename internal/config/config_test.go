@@ -10,7 +10,6 @@ import (
 )
 
 func testdataPath(name string) string {
-	// Tests run from the package directory; testdata is at repo root.
 	return filepath.Join("..", "..", "testdata", name)
 }
 
@@ -20,64 +19,83 @@ func TestLoad_ValidConfig_ParsesAllFields(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.ExternalDrive != "/Volumes/Backup" {
-		t.Errorf("ExternalDrive = %q, want /Volumes/Backup", cfg.ExternalDrive)
+	if cfg.Defaults == nil {
+		t.Fatal("Defaults is nil, want non-nil")
 	}
-	if len(cfg.SyncJobs) != 2 {
-		t.Fatalf("SyncJobs count = %d, want 2", len(cfg.SyncJobs))
+	if cfg.Defaults.Rsync == nil {
+		t.Fatal("Defaults.Rsync is nil, want non-nil")
 	}
-	if cfg.SyncJobs[0].Name != "photos" {
-		t.Errorf("SyncJobs[0].Name = %q, want photos", cfg.SyncJobs[0].Name)
+	if len(cfg.Defaults.Rsync.Flags) != 4 {
+		t.Errorf("Defaults.Rsync.Flags len = %d, want 4", len(cfg.Defaults.Rsync.Flags))
 	}
-	if cfg.SyncJobs[0].Delete {
-		t.Error("SyncJobs[0].Delete = true, want false")
+	if cfg.Defaults.Rclone == nil {
+		t.Fatal("Defaults.Rclone is nil, want non-nil")
 	}
-	if cfg.SyncJobs[1].Delete != true {
-		t.Error("SyncJobs[1].Delete = false, want true")
+	if cfg.Defaults.Rclone.Transfers != 6 {
+		t.Errorf("Defaults.Rclone.Transfers = %d, want 6", cfg.Defaults.Rclone.Transfers)
 	}
-	if len(cfg.SyncJobs[1].Sources) != 5 {
-		t.Errorf("SyncJobs[1].Sources count = %d, want 5", len(cfg.SyncJobs[1].Sources))
+	if len(cfg.Defaults.Rclone.Flags) != 2 {
+		t.Errorf("Defaults.Rclone.Flags len = %d, want 2", len(cfg.Defaults.Rclone.Flags))
 	}
-	if cfg.Cloud == nil {
-		t.Fatal("Cloud is nil, want non-nil")
+
+	if len(cfg.Jobs) != 4 {
+		t.Fatalf("Jobs count = %d, want 4", len(cfg.Jobs))
 	}
-	if cfg.Cloud.Mode != "sync" {
-		t.Errorf("Cloud.Mode = %q, want sync", cfg.Cloud.Mode)
+	if cfg.Jobs[0].Name != "photos" {
+		t.Errorf("Jobs[0].Name = %q, want photos", cfg.Jobs[0].Name)
 	}
-	if len(cfg.Cloud.Remotes) != 2 {
-		t.Errorf("Cloud.Remotes count = %d, want 2", len(cfg.Cloud.Remotes))
+	if cfg.Jobs[0].Engine != config.EngineRsync {
+		t.Errorf("Jobs[0].Engine = %q, want %s", cfg.Jobs[0].Engine, config.EngineRsync)
 	}
-	if len(cfg.Cloud.Items) != 9 {
-		t.Errorf("Cloud.Items count = %d, want 9", len(cfg.Cloud.Items))
+	if cfg.Jobs[0].Delete {
+		t.Error("Jobs[0].Delete = true, want false")
 	}
-	if cfg.Cloud.Tuning.Transfers != 6 {
-		t.Errorf("Cloud.Tuning.Transfers = %d, want 6", cfg.Cloud.Tuning.Transfers)
+	if cfg.Jobs[1].Delete != true {
+		t.Error("Jobs[1].Delete = false, want true")
+	}
+
+	// Rclone job fields
+	if cfg.Jobs[2].Engine != config.EngineRclone {
+		t.Errorf("Jobs[2].Engine = %q, want %s", cfg.Jobs[2].Engine, config.EngineRclone)
+	}
+	if cfg.Jobs[2].Mode != config.ModeSync {
+		t.Errorf("Jobs[2].Mode = %q, want %s", cfg.Jobs[2].Mode, config.ModeSync)
+	}
+	if len(cfg.Jobs[2].Remotes) != 2 {
+		t.Errorf("Jobs[2].Remotes len = %d, want 2", len(cfg.Jobs[2].Remotes))
+	}
+	if cfg.Jobs[2].BackupRetentionDays != 365 {
+		t.Errorf("Jobs[2].BackupRetentionDays = %d, want 365", cfg.Jobs[2].BackupRetentionDays)
+	}
+
+	// Per-job tuning override
+	if cfg.Jobs[3].Bwlimit != "2M" {
+		t.Errorf("Jobs[3].Bwlimit = %q, want 2M", cfg.Jobs[3].Bwlimit)
 	}
 }
 
-func TestLoad_MinimalConfig_DefaultsApplied(t *testing.T) {
+func TestLoad_MinimalConfig_NoDefaults(t *testing.T) {
 	cfg, err := config.LoadFile(testdataPath("config_minimal.toml"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if len(cfg.SyncJobs) != 1 {
-		t.Fatalf("SyncJobs count = %d, want 1", len(cfg.SyncJobs))
+	if len(cfg.Jobs) != 1 {
+		t.Fatalf("Jobs count = %d, want 1", len(cfg.Jobs))
 	}
-	if cfg.SyncJobs[0].Delete != false {
+	if cfg.Defaults != nil {
+		t.Error("Defaults should be nil when [defaults] section absent")
+	}
+	if cfg.Jobs[0].Delete != false {
 		t.Error("default Delete should be false")
-	}
-	if cfg.Cloud != nil {
-		t.Error("Cloud should be nil when [cloud] section absent")
 	}
 }
 
 func TestLoad_TildeExpansion(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	tomlData := `
-external_drive = "/tmp/test"
-[[sync]]
+[[job]]
 name = "tilde-test"
+engine = "rsync"
 sources = ["~/Documents"]
 destination = "~/backup"
 `
@@ -85,14 +103,45 @@ destination = "~/backup"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	wantSrc := filepath.Join(home, "Documents")
-	if cfg.SyncJobs[0].Sources[0] != wantSrc {
-		t.Errorf("source = %q, want %q", cfg.SyncJobs[0].Sources[0], wantSrc)
+	if cfg.Jobs[0].Sources[0] != wantSrc {
+		t.Errorf("source = %q, want %q", cfg.Jobs[0].Sources[0], wantSrc)
 	}
 	wantDst := filepath.Join(home, "backup")
-	if cfg.SyncJobs[0].Destination != wantDst {
-		t.Errorf("destination = %q, want %q", cfg.SyncJobs[0].Destination, wantDst)
+	if cfg.Jobs[0].Destination != wantDst {
+		t.Errorf("destination = %q, want %q", cfg.Jobs[0].Destination, wantDst)
+	}
+}
+
+func TestLoad_TildeExpansion_RcloneFields(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	tomlData := `
+[defaults.rclone]
+filter_file = "~/.config/rclone/filters.txt"
+
+[[job]]
+name = "cloud-tilde"
+engine = "rclone"
+source = "~/Documents"
+remotes = ["test"]
+mode = "copy"
+backup_path = "~/backups/archive"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantFilter := filepath.Join(home, ".config/rclone/filters.txt")
+	if cfg.Defaults.Rclone.FilterFile != wantFilter {
+		t.Errorf("FilterFile = %q, want %q", cfg.Defaults.Rclone.FilterFile, wantFilter)
+	}
+	wantSrc := filepath.Join(home, "Documents")
+	if cfg.Jobs[0].Source != wantSrc {
+		t.Errorf("Source = %q, want %q", cfg.Jobs[0].Source, wantSrc)
+	}
+	wantBackup := filepath.Join(home, "backups/archive")
+	if cfg.Jobs[0].BackupPath != wantBackup {
+		t.Errorf("BackupPath = %q, want %q", cfg.Jobs[0].BackupPath, wantBackup)
 	}
 }
 
@@ -106,38 +155,93 @@ func TestValidate_DuplicateJobNames_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestValidate_JobNamedCloud_ReturnsError(t *testing.T) {
-	_, err := config.LoadFile(testdataPath("config_invalid_cloud_job_name.toml"))
-	if err == nil {
-		t.Fatal("expected error for job named 'cloud', got nil")
-	}
-	if !strings.Contains(err.Error(), "reserved") {
-		t.Errorf("error %q should mention \"reserved\"", err.Error())
-	}
-}
-
 func TestValidate_InvalidMode_ReturnsError(t *testing.T) {
 	_, err := config.LoadFile(testdataPath("config_invalid_mode.toml"))
 	if err == nil {
-		t.Fatal("expected error for invalid cloud mode, got nil")
+		t.Fatal("expected error for invalid rclone mode, got nil")
 	}
 	if !strings.Contains(err.Error(), "invalid") {
 		t.Errorf("error %q should mention \"invalid\"", err.Error())
 	}
-	if !strings.Contains(err.Error(), "mirror") {
-		t.Errorf("error %q should mention the bad mode value \"mirror\"", err.Error())
+}
+
+func TestValidate_EmptyName_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = ""
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for empty name, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty name") {
+		t.Errorf("error %q should mention \"empty name\"", err.Error())
 	}
 }
 
-func TestValidate_EmptyRemoteName_ReturnsError(t *testing.T) {
+func TestValidate_InvalidEngine_ReturnsError(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/test"
-[cloud]
-mode = "sync"
-[[cloud.remotes]]
-name = ""
-[[cloud.items]]
+[[job]]
+name = "bad"
+engine = "scp"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for invalid engine, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid engine") {
+		t.Errorf("error %q should mention \"invalid engine\"", err.Error())
+	}
+}
+
+func TestValidate_RsyncNoSources_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "no-src"
+engine = "rsync"
+sources = []
+destination = "/tmp/b"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for no sources, got nil")
+	}
+	if !strings.Contains(err.Error(), "no sources") {
+		t.Errorf("error %q should mention \"no sources\"", err.Error())
+	}
+}
+
+func TestValidate_RcloneNoRemotes_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "no-remotes"
+engine = "rclone"
 source = "/tmp/a"
+remotes = []
+mode = "copy"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for no remotes, got nil")
+	}
+	if !strings.Contains(err.Error(), "no remotes") {
+		t.Errorf("error %q should mention \"no remotes\"", err.Error())
+	}
+}
+
+func TestValidate_RcloneEmptyRemoteName_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "empty-remote"
+engine = "rclone"
+source = "/tmp/a"
+remotes = ["gdrive", ""]
+mode = "copy"
 `
 	_, err := config.LoadBytes([]byte(tomlData))
 	if err == nil {
@@ -148,72 +252,71 @@ source = "/tmp/a"
 	}
 }
 
-func TestValidate_DuplicateRemoteNames_ReturnsError(t *testing.T) {
+func TestValidate_RcloneEmptySource_ReturnsError(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/test"
-[cloud]
-mode = "sync"
-[[cloud.remotes]]
-name = "same"
-[[cloud.remotes]]
-name = "same"
-[[cloud.items]]
-source = "/tmp/a"
+[[job]]
+name = "no-src"
+engine = "rclone"
+source = ""
+remotes = ["test"]
+mode = "copy"
 `
 	_, err := config.LoadBytes([]byte(tomlData))
 	if err == nil {
-		t.Fatal("expected error for duplicate remote names, got nil")
+		t.Fatal("expected error for empty source, got nil")
 	}
-	if !strings.Contains(err.Error(), "duplicate") {
-		t.Errorf("error %q should mention \"duplicate\"", err.Error())
+	if !strings.Contains(err.Error(), "empty source") {
+		t.Errorf("error %q should mention \"empty source\"", err.Error())
 	}
 }
 
-func TestLoad_XDGConfigHome_ResolvesPath(t *testing.T) {
-	tmpDir := t.TempDir()
-	confDir := filepath.Join(tmpDir, "shuttle")
-	if err := os.MkdirAll(confDir, 0o755); err != nil {
-		t.Fatalf("creating config dir: %v", err)
-	}
+func TestValidate_RsyncEmptyDestination_ReturnsError(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/xdg-test"
-[[sync]]
-name = "xdg-job"
-sources = ["/tmp/src"]
-destination = "/tmp/dst"
+[[job]]
+name = "no-dst"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = ""
 `
-	if err := os.WriteFile(filepath.Join(confDir, "config.toml"), []byte(tomlData), 0o644); err != nil {
-		t.Fatalf("writing config file: %v", err)
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for empty destination, got nil")
 	}
+	if !strings.Contains(err.Error(), "empty destination") {
+		t.Errorf("error %q should mention \"empty destination\"", err.Error())
+	}
+}
 
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
+func TestValidate_RcloneDuplicateRemotes_ReturnsError(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "dup-remotes"
+engine = "rclone"
+source = "/tmp/a"
+remotes = ["same", "same"]
+mode = "copy"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for duplicate remotes, got nil")
 	}
-	if cfg.ExternalDrive != "/tmp/xdg-test" {
-		t.Errorf("ExternalDrive = %q, want /tmp/xdg-test", cfg.ExternalDrive)
-	}
-	if len(cfg.SyncJobs) != 1 || cfg.SyncJobs[0].Name != "xdg-job" {
-		t.Errorf("SyncJobs = %v, want one job named xdg-job", cfg.SyncJobs)
+	if !strings.Contains(err.Error(), "duplicate remote") {
+		t.Errorf("error %q should mention \"duplicate remote\"", err.Error())
 	}
 }
 
 func TestJobNames_ReturnsNamesInOrder(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/test"
-[[sync]]
+[[job]]
 name = "alpha"
+engine = "rsync"
 sources = ["/tmp/a"]
 destination = "/tmp/dst"
-[[sync]]
+
+[[job]]
 name = "beta"
+engine = "rsync"
 sources = ["/tmp/b"]
-destination = "/tmp/dst"
-[[sync]]
-name = "gamma"
-sources = ["/tmp/c"]
 destination = "/tmp/dst"
 `
 	cfg, err := config.LoadBytes([]byte(tomlData))
@@ -221,7 +324,7 @@ destination = "/tmp/dst"
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := cfg.JobNames()
-	want := []string{"alpha", "beta", "gamma"}
+	want := []string{"alpha", "beta"}
 	if len(got) != len(want) {
 		t.Fatalf("JobNames() len = %d, want %d", len(got), len(want))
 	}
@@ -232,37 +335,44 @@ destination = "/tmp/dst"
 	}
 }
 
-func TestRemoteNames_ReturnsNamesInOrder(t *testing.T) {
+func TestAllRemoteNames_ReturnsUnion(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/test"
-[cloud]
+[[job]]
+name = "job1"
+engine = "rclone"
+source = "/tmp/a"
+remotes = ["gdrive", "koofr"]
 mode = "copy"
-[[cloud.remotes]]
-name = "gdrive"
-[[cloud.remotes]]
-name = "onedrive"
+
+[[job]]
+name = "job2"
+engine = "rclone"
+source = "/tmp/b"
+remotes = ["gdrive", "onedrive"]
+mode = "copy"
 `
 	cfg, err := config.LoadBytes([]byte(tomlData))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got := cfg.RemoteNames()
-	want := []string{"gdrive", "onedrive"}
+	got := cfg.AllRemoteNames()
+	// Deduplicated, first-seen order: gdrive, koofr, onedrive
+	want := []string{"gdrive", "koofr", "onedrive"}
 	if len(got) != len(want) {
-		t.Fatalf("RemoteNames() len = %d, want %d", len(got), len(want))
+		t.Fatalf("AllRemoteNames() len = %d, want %d", len(got), len(want))
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("RemoteNames()[%d] = %q, want %q", i, got[i], want[i])
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("AllRemoteNames()[%d] = %q, want %q", i, got[i], name)
 		}
 	}
 }
 
-func TestRemoteNames_NilCloud_ReturnsNil(t *testing.T) {
+func TestAllRemoteNames_NoRcloneJobs_ReturnsNil(t *testing.T) {
 	tomlData := `
-external_drive = "/tmp/test"
-[[sync]]
-name = "no-cloud"
+[[job]]
+name = "rsync-only"
+engine = "rsync"
 sources = ["/tmp/src"]
 destination = "/tmp/dst"
 `
@@ -270,54 +380,45 @@ destination = "/tmp/dst"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := cfg.RemoteNames(); got != nil {
-		t.Errorf("RemoteNames() = %v, want nil when Cloud is nil", got)
+	if got := cfg.AllRemoteNames(); got != nil {
+		t.Errorf("AllRemoteNames() = %v, want nil when no rclone jobs", got)
 	}
 }
 
-func TestLoad_NoSyncJobs_EmptySlice(t *testing.T) {
-	tomlData := `
-external_drive = "/tmp/drive"
-`
+func TestLoad_NoJobs_EmptySlice(t *testing.T) {
+	tomlData := ``
 	cfg, err := config.LoadBytes([]byte(tomlData))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.SyncJobs) != 0 {
-		t.Errorf("SyncJobs len = %d, want 0", len(cfg.SyncJobs))
+	if len(cfg.Jobs) != 0 {
+		t.Errorf("Jobs len = %d, want 0", len(cfg.Jobs))
 	}
 }
 
-func TestLoad_TildeExpansion_CloudAndExternalDrive(t *testing.T) {
-	home, _ := os.UserHomeDir()
+func TestLoad_XDGConfigHome_ResolvesPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	confDir := filepath.Join(tmpDir, "shuttle")
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatalf("creating config dir: %v", err)
+	}
 	tomlData := `
-external_drive = "~/Volumes/backup"
-[cloud]
-mode = "sync"
-backup_path = "~/backups/archive"
-[[cloud.items]]
-source = "~/Documents/notes"
-destination = "~/Cloud/notes"
+[[job]]
+name = "xdg-job"
+engine = "rsync"
+sources = ["/tmp/src"]
+destination = "/tmp/dst"
 `
-	cfg, err := config.LoadBytes([]byte(tomlData))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := os.WriteFile(filepath.Join(confDir, "config.toml"), []byte(tomlData), 0o644); err != nil {
+		t.Fatalf("writing config file: %v", err)
 	}
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	wantDrive := filepath.Join(home, "Volumes/backup")
-	if cfg.ExternalDrive != wantDrive {
-		t.Errorf("ExternalDrive = %q, want %q", cfg.ExternalDrive, wantDrive)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
 	}
-	wantBackup := filepath.Join(home, "backups/archive")
-	if cfg.Cloud.BackupPath != wantBackup {
-		t.Errorf("Cloud.BackupPath = %q, want %q", cfg.Cloud.BackupPath, wantBackup)
-	}
-	wantSrc := filepath.Join(home, "Documents/notes")
-	if cfg.Cloud.Items[0].Source != wantSrc {
-		t.Errorf("Cloud.Items[0].Source = %q, want %q", cfg.Cloud.Items[0].Source, wantSrc)
-	}
-	wantDst := filepath.Join(home, "Cloud/notes")
-	if cfg.Cloud.Items[0].Destination != wantDst {
-		t.Errorf("Cloud.Items[0].Destination = %q, want %q", cfg.Cloud.Items[0].Destination, wantDst)
+	if len(cfg.Jobs) != 1 || cfg.Jobs[0].Name != "xdg-job" {
+		t.Errorf("Jobs = %v, want one job named xdg-job", cfg.Jobs)
 	}
 }

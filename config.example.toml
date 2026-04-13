@@ -1,39 +1,17 @@
 # Shuttle Configuration
 # Location: ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml
 
-# Mount point of your primary external hard drive.
-external_drive = "/Volumes/Backup"
+# -- Default flags for each engine (optional) --
+# Shuttle injects a small set of instrumentation flags (--stats, progress)
+# for stats capture. All other flags come from these defaults or per-job
+# extra_flags. Per-job fields override defaults via last-flag-wins.
 
-# -- rsync-based sync jobs, executed in config order --
+[defaults.rsync]
+flags = ["-a", "-v", "-h", "-P", "-u", "--exclude=.DS_Store"]
 
-[[sync]]
-name = "photos"
-sources = ["/tmp/src/photos/"]
-destination = "~/Pictures/Backup/"
-delete = false
-extra_opts = ["--exclude=.*"]
-
-[[sync]]
-name = "projects"
-sources = [
-    "~/Projects/app-one",
-    "~/Projects/app-two",
-    "~/Projects/notes.txt",
-    "~/Projects/app-three",
-    "~/.config/rclone",
-]
-destination = "/Volumes/Backup/Secrets/secrets"
-delete = true
-
-# -- rclone-based cloud sync --
-
-[cloud]
-mode = "sync"                    # "copy" or "sync"
-backup_path = "_archive"         # "" to disable
-backup_retention_days = 365
-remote_path = ""
-
-[cloud.tuning]
+[defaults.rclone]
+flags = ["--copy-links", "--fast-list", "--track-renames", "--track-renames-strategy", "modtime,size", "--update"]
+filter_file = "~/.config/rclone/filters.txt"
 transfers = 6
 checkers = 16
 bwlimit = "10M"
@@ -45,35 +23,48 @@ contimeout = "90s"
 low_level_retries = 15
 order_by = "modtime,asc"
 
-[[cloud.remotes]]
-name = "my_gdrive"
+# -- Jobs, executed in config order --
+# Each job declares an engine ("rsync" or "rclone") and the fields
+# relevant to that engine.
 
-[[cloud.remotes]]
-name = "my_s3"
+# Rsync job: sync photos to iCloud
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/src/photos/"]
+destination = "~/Pictures/Backup/"
+delete = false
+extra_flags = ["--exclude=.*"]
 
-[[cloud.items]]
-source = "/tmp/src/ereader"
+# Rsync job: back up secrets to external drive
+[[job]]
+name = "projects"
+engine = "rsync"
+sources = [
+    "~/Projects/app-one",
+    "~/Projects/app-two",
+    "~/Projects/notes.txt",
+    "~/Projects/app-three",
+    "~/.config/rclone",
+]
+destination = "/Volumes/Backup/Secrets/secrets"
+delete = true
 
-[[cloud.items]]
+# Rclone job: sync documents to multiple cloud remotes
+[[job]]
+name = "documents-to-cloud"
+engine = "rclone"
 source = "~/Documents"
+remotes = ["my_gdrive", "my_s3"]
+mode = "sync"
+backup_path = "_archive"
+backup_retention_days = 365
 
-[[cloud.items]]
-source = "media"
-
-[[cloud.items]]
-source = "audiobooks"
-
-[[cloud.items]]
-source = "~/Library/Mobile Documents/com~apple~CloudDocs/Comics"
-
-[[cloud.items]]
-source = "Music"
-
-[[cloud.items]]
-source = "~/Calibre Library"
-
-[[cloud.items]]
-source = "~/.local/bin"
-
-[[cloud.items]]
-source = "/Volumes/Backup/Collections"
+# Rclone job: copy music (bandwidth-limited)
+[[job]]
+name = "music-to-cloud"
+engine = "rclone"
+source = "/Volumes/Backup/Music"
+remotes = ["my_gdrive"]
+mode = "copy"
+bwlimit = "2M"

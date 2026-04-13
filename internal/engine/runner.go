@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,47 +16,45 @@ import (
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
-const lockFilePath = "/tmp/shuttle.lock"
-
 // RunOptions holds the CLI flags that control a sync run.
 type RunOptions struct {
 	DryRun          bool
 	SkipJobs        []string
 	OnlyJobs        []string
 	SelectedRemotes []string
-	RcloneOverrides []string
 }
 
-// Runner orchestrates sync jobs and cloud uploads. It checks prerequisites,
-// acquires a file lock to prevent concurrent runs, dispatches jobs in config
-// order, and collects results into a Summary.
+// Runner orchestrates jobs: checks prerequisites, acquires a per-config
+// file lock, dispatches jobs in config order, and collects results.
 type Runner struct {
-	cfg      *config.Config
-	logger   *log.Logger
-	rsync    *RsyncExecutor
-	rclone   *RcloneExecutor
-	lockFile *os.File // held open to maintain flock; released on process exit
+	cfg        *config.Config
+	configPath string
+	logger     *log.Logger
+	rsync      *RsyncExecutor
+	rclone     *RcloneExecutor
+	dryRun     bool
+	logFile    string
+	lockFile   *os.File // held open to maintain flock; released on process exit
 }
 
-// NewRunner creates a Runner wired to the given config and logger. The dryRun
-// flag propagates to both the rsync and rclone executors. logFile is the path
-// to the shared log file used by both executors for stats capture.
-func NewRunner(cfg *config.Config, logger *log.Logger, dryRun bool, logFile string) *Runner {
+// NewRunner creates a Runner for the given config. configPath is the
+// absolute path to the config file (used for per-config locking).
+func NewRunner(cfg *config.Config, configPath string, logger *log.Logger, dryRun bool, logFile string) *Runner {
 	return &Runner{
-		cfg:    cfg,
-		logger: logger,
-		rsync:  NewRsyncExecutor(logger, dryRun, logFile),
-		rclone: NewRcloneExecutor(logger, dryRun, logFile),
+		cfg:        cfg,
+		configPath: configPath,
+		logger:     logger,
+		rsync:      NewRsyncExecutor(logger),
+		rclone:     NewRcloneExecutor(logger, logFile),
+		dryRun:     dryRun,
+		logFile:    logFile,
 	}
 }
 
-// Run executes the full sync pipeline: prerequisites, lock, sync jobs, cloud
-// uploads. Partial failures are recorded in the summary but do not stop
-// subsequent jobs.
+// Run executes the full pipeline: prerequisites, lock, jobs, summary.
+// Partial failures are recorded in the summary but do not stop subsequent jobs.
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
-	runCloud := shouldRunJob("cloud", opts.SkipJobs, opts.OnlyJobs)
-
-	if err := r.checkPrerequisites(opts, runCloud); err != nil {
+	if err := r.checkPrerequisites(opts); err != nil {
 		return Summary{}, fmt.Errorf("prerequisites: %w", err)
 	}
 
@@ -68,8 +67,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 
 	var jobs []JobResult
 
-	// Sync jobs in config order.
-	for _, job := range r.cfg.SyncJobs {
+	for _, job := range r.cfg.Jobs {
 		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
 			jobs = append(jobs, JobResult{
 				Name:  job.Name,
@@ -77,35 +75,36 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 			})
 			continue
 		}
-		r.logger.Header(fmt.Sprintf("Syncing: %s", job.Name))
-		jobResult := r.runSyncJob(ctx, job)
-		jobs = append(jobs, jobResult)
-	}
 
-	// Cloud uploads: remote x item matrix.
-	if runCloud && r.cfg.Cloud != nil {
-		remotes := r.targetRemotes(opts.SelectedRemotes)
-		filterFile := expandTilde("~/.config/rclone/filters.txt")
-
-		rcloneOpts := RcloneOpts{
-			Mode:         r.cfg.Cloud.Mode,
-			TuningFlags:  r.buildTuningFlags(opts.RcloneOverrides),
-			BackupPath:   r.cfg.Cloud.BackupPath,
-			RunTimestamp: timestamp,
-			FilterFile:   filterFile,
-		}
-
-		for _, remote := range remotes {
-			r.logger.Header(fmt.Sprintf("Cloud upload: %s [mode: %s]", remote, r.cfg.Cloud.Mode))
-			r.rclone.CleanupArchives(ctx, remote, r.cfg.Cloud.BackupPath, r.cfg.Cloud.BackupRetentionDays)
-			jobResult := r.runCloudJob(ctx, remote, rcloneOpts)
+		switch job.Engine {
+		case config.EngineRsync:
+			r.logger.Header(fmt.Sprintf("Syncing: %s", job.Name))
+			jobResult := r.runRsyncJob(ctx, job)
 			jobs = append(jobs, jobResult)
+
+		case config.EngineRclone:
+			var rcloneDefaults *config.RcloneDefaults
+			if r.cfg.Defaults != nil {
+				rcloneDefaults = r.cfg.Defaults.Rclone
+			}
+			WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
+			remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
+			if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
+				jobs = append(jobs, JobResult{
+					Name:  job.Name,
+					Items: []ItemResult{{Name: job.Name, Status: StatusSkipped}},
+				})
+				continue
+			}
+			for _, remote := range remotes {
+				r.logger.Header(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
+				if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
+					r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
+				}
+				jobResult := r.runRcloneJob(ctx, job, remote, timestamp)
+				jobs = append(jobs, jobResult)
+			}
 		}
-	} else if !runCloud {
-		jobs = append(jobs, JobResult{
-			Name:  "cloud",
-			Items: []ItemResult{{Name: "cloud", Status: StatusSkipped}},
-		})
 	}
 
 	summary := Summary{
@@ -125,12 +124,18 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	return summary, nil
 }
 
-// runSyncJob iterates each source in the job, resolves the path, and calls
-// rsync. Sources that cannot be stat'd are recorded as StatusNotFound.
-func (r *Runner) runSyncJob(ctx context.Context, job config.SyncJob) JobResult {
+// runRsyncJob iterates each source in the job and calls rsync.
+func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 	var items []ItemResult
+	var defaults *config.RsyncDefaults
+	if r.cfg.Defaults != nil {
+		defaults = r.cfg.Defaults.Rsync
+	}
+
+	WarnFlagConflicts(r.logger, "rsync", collectRsyncUserFlags(defaults, job))
+
 	for _, source := range job.Sources {
-		resolved, isDir, err := expandPath(source)
+		resolved, isDir, err := statPath(source)
 		if err != nil {
 			r.logger.Error(fmt.Sprintf("Source not found: %s: %v", source, err))
 			items = append(items, ItemResult{
@@ -140,120 +145,132 @@ func (r *Runner) runSyncJob(ctx context.Context, job config.SyncJob) JobResult {
 			continue
 		}
 
-		rsyncOpts := RsyncOpts{
-			Delete:    job.Delete && isDir,
-			ExtraOpts: job.ExtraOpts,
-		}
-
 		r.logger.Info(fmt.Sprintf("Source: %s", resolved))
 		r.logger.Info(fmt.Sprintf("Destination: %s", job.Destination))
 
-		result := r.rsync.Exec(ctx, resolved, job.Destination, rsyncOpts)
+		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
+		result := r.rsync.Exec(ctx, args)
 		items = append(items, result)
 	}
 	return JobResult{Name: job.Name, Items: items}
 }
 
-// runCloudJob iterates each cloud item, resolves its source, builds the
-// rclone destination path, and calls rclone for the given remote.
-func (r *Runner) runCloudJob(ctx context.Context, remoteName string, opts RcloneOpts) JobResult {
-	var items []ItemResult
-	prefix := r.cfg.Cloud.RemotePath
-	if prefix != "" {
-		prefix = strings.TrimRight(prefix, "/") + "/"
+// runRcloneJob runs rclone for a single source against a single remote.
+// WarnFlagConflicts is called by the caller (Run) once per job, not here.
+func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, timestamp string) JobResult {
+	var rcloneDefaults *config.RcloneDefaults
+	if r.cfg.Defaults != nil {
+		rcloneDefaults = r.cfg.Defaults.Rclone
 	}
 
-	for _, item := range r.cfg.Cloud.Items {
-		resolved, isRemote, isDir, err := resolveCloudSource(item.Source, r.cfg.ExternalDrive)
+	source := job.Source
+	isRemote := isRcloneRemote(source)
+
+	var isDir bool
+	if isRemote {
+		isDir = true
+	} else {
+		_, isDirStat, err := statPath(source)
 		if err != nil {
-			r.logger.Error(fmt.Sprintf("Skipping %s: %v", item.Source, err))
-			items = append(items, ItemResult{
-				Name:   filepath.Base(item.Source),
-				Status: StatusNotFound,
-			})
+			r.logger.Error(fmt.Sprintf("Skipping %s: %v", source, err))
+			return JobResult{
+				Name: job.Name + ":" + remoteName,
+				Items: []ItemResult{{
+					Name:   filepath.Base(source),
+					Status: StatusNotFound,
+				}},
+			}
+		}
+		isDir = isDirStat
+	}
+
+	destName := rcloneDestName(job.Destination, source, isRemote)
+
+	var destination string
+	switch {
+	case destName == "":
+		destination = fmt.Sprintf("%s:", remoteName)
+	case isDir || isRemote:
+		destination = fmt.Sprintf("%s:%s/", remoteName, destName)
+	default:
+		destination = fmt.Sprintf("%s:%s", remoteName, destName)
+	}
+
+	if !isRemote && isDir && !strings.HasSuffix(source, "/") {
+		source += "/"
+	}
+
+	r.logger.Info(fmt.Sprintf("Source: %s", source))
+	r.logger.Info(fmt.Sprintf("Destination: %s", destination))
+
+	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
+	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
+
+	result := r.rclone.Exec(ctx, args)
+	result.Name = destName
+	if destName == "" {
+		result.Name = "(prefix root)"
+	}
+
+	return JobResult{Name: job.Name + ":" + remoteName, Items: []ItemResult{result}}
+}
+
+// collectRsyncUserFlags gathers all user-provided flags for rsync conflict detection.
+func collectRsyncUserFlags(defaults *config.RsyncDefaults, job config.Job) []string {
+	var flags []string
+	if defaults != nil {
+		flags = append(flags, defaults.Flags...)
+	}
+	flags = append(flags, job.ExtraFlags...)
+	return flags
+}
+
+// collectRcloneUserFlags gathers all user-provided flags for rclone conflict detection.
+func collectRcloneUserFlags(defaults *config.RcloneDefaults, job config.Job) []string {
+	var flags []string
+	if defaults != nil {
+		flags = append(flags, defaults.Flags...)
+	}
+	flags = append(flags, job.ExtraFlags...)
+	return flags
+}
+
+// checkPrerequisites validates that required tools and filter files exist.
+// Each check is conditional on whether the corresponding job type will
+// actually run.
+func (r *Runner) checkPrerequisites(opts RunOptions) error {
+	needsRsync := false
+	needsRclone := false
+
+	for _, job := range r.cfg.Jobs {
+		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
 			continue
 		}
-
-		destName := cloudDestName(item, resolved, isRemote)
-
-		var destination string
-		switch {
-		case destName == "":
-			destination = fmt.Sprintf("%s:%s", remoteName, strings.TrimRight(prefix, "/"))
-		case isDir || isRemote:
-			destination = fmt.Sprintf("%s:%s%s/", remoteName, prefix, destName)
-		default:
-			destination = fmt.Sprintf("%s:%s%s", remoteName, prefix, destName)
-		}
-
-		// Append trailing slash to directory sources so rclone syncs contents.
-		if !isRemote && isDir && !strings.HasSuffix(resolved, "/") {
-			resolved += "/"
-		}
-
-		r.logger.Info(fmt.Sprintf("Source: %s", resolved))
-		r.logger.Info(fmt.Sprintf("Destination: %s", destination))
-
-		result := r.rclone.Exec(ctx, resolved, destination, remoteName, isDir, opts)
-		result.Name = destName
-		if destName == "" {
-			result.Name = "(prefix root)"
-		}
-		items = append(items, result)
-	}
-
-	return JobResult{Name: "cloud:" + remoteName, Items: items}
-}
-
-// cloudDestName determines the destination folder name for a cloud item.
-// Uses item.Destination if set, otherwise derives it from the source basename.
-// For remote sources (containing ':'), extracts the path after the colon.
-func cloudDestName(item config.CloudItem, resolved string, isRemote bool) string {
-	if item.Destination != "" {
-		return item.Destination
-	}
-	if isRemote {
-		parts := strings.SplitN(item.Source, ":", 2)
-		if len(parts) > 1 && parts[1] != "" && parts[1] != "/" {
-			return filepath.Base(strings.TrimRight(parts[1], "/"))
-		}
-		return ""
-	}
-	return filepath.Base(strings.TrimRight(resolved, "/"))
-}
-
-// checkPrerequisites validates that required tools and paths exist. Each check
-// is conditional on whether the corresponding job type will actually run.
-func (r *Runner) checkPrerequisites(opts RunOptions, runCloud bool) error {
-	hasSyncJobs := false
-	for _, job := range r.cfg.SyncJobs {
-		if shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-			hasSyncJobs = true
-			break
+		switch job.Engine {
+		case config.EngineRsync:
+			needsRsync = true
+		case config.EngineRclone:
+			needsRclone = true
 		}
 	}
 
-	if hasSyncJobs {
+	if needsRsync {
 		if _, err := exec.LookPath("rsync"); err != nil {
 			return fmt.Errorf("rsync not found on PATH")
 		}
 	}
 
-	if runCloud {
+	if needsRclone {
 		if _, err := exec.LookPath("rclone"); err != nil {
 			return fmt.Errorf("rclone not found on PATH")
 		}
-		filterFile := expandTilde("~/.config/rclone/filters.txt")
-		if _, err := os.Stat(filterFile); err != nil {
-			return fmt.Errorf("rclone filter file not found: %s", filterFile)
-		}
 	}
 
-	// No flock PATH check needed: locking uses syscall.Flock directly.
-
-	if r.needsExternalDrive(opts) {
-		if _, err := os.Stat(r.cfg.ExternalDrive); err != nil {
-			return fmt.Errorf("external drive not found at %s", r.cfg.ExternalDrive)
+	// Check filter files referenced by active rclone jobs.
+	filterFiles := r.collectFilterFiles(opts)
+	for _, ff := range filterFiles {
+		if _, err := os.Stat(ff); err != nil {
+			return fmt.Errorf("rclone filter file not found: %s", ff)
 		}
 	}
 
@@ -261,115 +278,89 @@ func (r *Runner) checkPrerequisites(opts RunOptions, runCloud bool) error {
 	return nil
 }
 
-// needsExternalDrive returns true when any active job references the
-// configured external drive path (sync sources/destinations that start with
-// ExternalDrive, or cloud items with relative paths that resolve against it).
-func (r *Runner) needsExternalDrive(opts RunOptions) bool {
-	for _, job := range r.cfg.SyncJobs {
+// collectFilterFiles returns all unique filter file paths that will be used
+// by active rclone jobs (considering both default and per-job overrides).
+func (r *Runner) collectFilterFiles(opts RunOptions) []string {
+	seen := make(map[string]bool)
+	var files []string
+
+	defaultFilter := ""
+	if r.cfg.Defaults != nil && r.cfg.Defaults.Rclone != nil {
+		defaultFilter = r.cfg.Defaults.Rclone.FilterFile
+	}
+
+	for _, job := range r.cfg.Jobs {
+		if job.Engine != config.EngineRclone {
+			continue
+		}
 		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
 			continue
 		}
-		for _, src := range job.Sources {
-			if strings.HasPrefix(src, r.cfg.ExternalDrive) {
-				return true
-			}
-		}
-		if strings.HasPrefix(job.Destination, r.cfg.ExternalDrive) {
-			return true
-		}
-	}
 
-	runCloud := shouldRunJob("cloud", opts.SkipJobs, opts.OnlyJobs)
-	if runCloud && r.cfg.Cloud != nil {
-		for _, item := range r.cfg.Cloud.Items {
-			src := item.Source
-			// Relative paths (not absolute, not tilde, not remote) resolve against the external drive.
-			if !strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "~") && !strings.Contains(src, ":") {
-				return true
-			}
+		ff := job.FilterFile
+		if ff == "" {
+			ff = defaultFilter
+		}
+		if ff != "" && !seen[ff] {
+			seen[ff] = true
+			files = append(files, ff)
 		}
 	}
-	return false
+	return files
 }
 
 // acquireLock obtains an exclusive, non-blocking file lock via syscall.Flock.
-// The lock file descriptor is stored on the Runner to prevent GC from closing
-// it and releasing the lock prematurely.
+// The lock file path is derived from the config file path so that different
+// configs can run concurrently.
 func (r *Runner) acquireLock() error {
-	f, err := os.OpenFile(lockFilePath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockPath := r.lockFilePath()
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return fmt.Errorf("another instance is already running")
+		return fmt.Errorf("another instance is already running (lock: %s)", lockPath)
 	}
 	r.lockFile = f
 	return nil
 }
 
-// targetRemotes returns the user-selected remotes if any were specified,
-// otherwise falls back to all configured remote names.
-func (r *Runner) targetRemotes(selected []string) []string {
-	if len(selected) > 0 {
-		return selected
-	}
-	return r.cfg.RemoteNames()
+// lockFilePath returns /tmp/shuttle-<hash>.lock where hash is the first
+// 8 hex characters of SHA-256 of the absolute config file path.
+func (r *Runner) lockFilePath() string {
+	h := sha256.Sum256([]byte(r.configPath))
+	return fmt.Sprintf("/tmp/shuttle-%x.lock", h[:4])
 }
 
-// buildTuningFlags translates CloudTuning struct fields to rclone flag strings.
-// When overrides are provided (from CLI), those are used verbatim instead.
-func (r *Runner) buildTuningFlags(overrides []string) []string {
-	if len(overrides) > 0 {
-		return overrides
+// targetRemotes returns the intersection of the job's remotes and the
+// user-selected remotes. If no selection was made, returns all job remotes.
+func (r *Runner) targetRemotes(jobRemotes, selected []string) []string {
+	if len(selected) == 0 {
+		return jobRemotes
 	}
-	if r.cfg.Cloud == nil {
-		return nil
+	selectedSet := make(map[string]bool, len(selected))
+	for _, s := range selected {
+		selectedSet[s] = true
 	}
-	t := r.cfg.Cloud.Tuning
-	var flags []string
-	if t.Transfers > 0 {
-		flags = append(flags, "--transfers", fmt.Sprintf("%d", t.Transfers))
+	var filtered []string
+	for _, remote := range jobRemotes {
+		if selectedSet[remote] {
+			filtered = append(filtered, remote)
+		}
 	}
-	if t.Checkers > 0 {
-		flags = append(flags, "--checkers", fmt.Sprintf("%d", t.Checkers))
-	}
-	if t.Bwlimit != "" {
-		flags = append(flags, "--bwlimit", t.Bwlimit)
-	}
-	if t.DriveChunkSize != "" {
-		flags = append(flags, "--drive-chunk-size", t.DriveChunkSize)
-	}
-	if t.BufferSize != "" {
-		flags = append(flags, "--buffer-size", t.BufferSize)
-	}
-	if t.UseMmap {
-		flags = append(flags, "--use-mmap")
-	}
-	if t.Timeout != "" {
-		flags = append(flags, "--timeout", t.Timeout)
-	}
-	if t.Contimeout != "" {
-		flags = append(flags, "--contimeout", t.Contimeout)
-	}
-	if t.LowLevelRetries > 0 {
-		flags = append(flags, "--low-level-retries", fmt.Sprintf("%d", t.LowLevelRetries))
-	}
-	if t.OrderBy != "" {
-		flags = append(flags, "--order-by", t.OrderBy)
-	}
-	return flags
+	return filtered
 }
 
 // ValidateJobNames checks that all names in skip and only are recognized job
-// names (including "cloud" as a reserved word). Returns an error if skip and
-// only are both non-empty, or if any name is unknown.
+// names. Returns an error if skip and only are both non-empty, or if any name
+// is unknown.
 func ValidateJobNames(skip, only, jobNames []string) error {
 	if len(skip) > 0 && len(only) > 0 {
 		return fmt.Errorf("--skip and --only are mutually exclusive")
 	}
 
-	valid := map[string]bool{"cloud": true}
+	valid := make(map[string]bool, len(jobNames))
 	for _, name := range jobNames {
 		valid[name] = true
 	}

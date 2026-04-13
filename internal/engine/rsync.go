@@ -14,59 +14,29 @@ import (
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
-// rsyncBaseOpts are the fixed flags passed to every rsync invocation.
-// They request archive mode, verbose human-readable output, partial-file
-// resume, macOS extended attributes, skip-newer, stats, and DS_Store exclusion.
-var rsyncBaseOpts = []string{
-	"-a", "-v", "-h", "-P", "-E", "-u",
-	"--stats", "--info=progress2", "--exclude=.DS_Store",
-}
-
-// RsyncOpts carries per-job configuration for a single rsync call.
-// Delete controls --delete-after; ExtraOpts are appended verbatim after the
-// base flags and before the source/destination arguments.
-type RsyncOpts struct {
-	Delete    bool
-	ExtraOpts []string
-}
-
-// RsyncExecutor wraps rsync execution via os/exec.
-// dryRun injects --dry-run into every call.
-// logFile, when non-empty, injects --log-file=<path> so rsync mirrors its
-// output to a persistent file.
+// RsyncExecutor wraps rsync execution via os/exec. It receives pre-assembled
+// argument lists from the runner (built by BuildRsyncArgs) and handles command
+// execution, output capture, and stats parsing.
 type RsyncExecutor struct {
-	logger  *log.Logger
-	dryRun  bool
-	logFile string
+	logger *log.Logger
 }
 
-// NewRsyncExecutor returns a configured RsyncExecutor. The logger receives
-// error messages on exec failure. dryRun and logFile are applied to every
-// subsequent Exec call.
-func NewRsyncExecutor(logger *log.Logger, dryRun bool, logFile string) *RsyncExecutor {
-	return &RsyncExecutor{logger: logger, dryRun: dryRun, logFile: logFile}
+// NewRsyncExecutor returns a configured RsyncExecutor.
+func NewRsyncExecutor(logger *log.Logger) *RsyncExecutor {
+	return &RsyncExecutor{logger: logger}
 }
 
-// Exec runs rsync with the given source, destination, and per-job options.
-// Stdout is written to the terminal and simultaneously captured for stats
-// parsing. Returns an ItemResult with parsed TransferStats and StatusOK or
-// StatusFailed based on the rsync exit code.
-func (e *RsyncExecutor) Exec(ctx context.Context, source, destination string, opts RsyncOpts) ItemResult {
-	args := make([]string, 0, len(rsyncBaseOpts)+10)
-	args = append(args, rsyncBaseOpts...)
-
-	if e.dryRun {
-		args = append(args, "--dry-run")
+// Exec runs rsync with the given pre-assembled argument list.
+// The args slice must contain all flags, source, and destination (source is
+// second-to-last, destination is last). Stdout is written to the terminal and
+// simultaneously captured for stats parsing. Returns an ItemResult with parsed
+// TransferStats and StatusOK or StatusFailed based on the rsync exit code.
+func (e *RsyncExecutor) Exec(ctx context.Context, args []string) ItemResult {
+	// Name is derived from the second-to-last arg (source).
+	source := ""
+	if len(args) >= 2 {
+		source = args[len(args)-2]
 	}
-	if e.logFile != "" {
-		args = append(args, "--log-file="+e.logFile)
-	}
-	if opts.Delete {
-		args = append(args, "--delete-after")
-	}
-	args = append(args, opts.ExtraOpts...)
-	args = append(args, source, destination)
-
 	name := filepath.Base(strings.TrimRight(source, "/"))
 
 	start := time.Now()
