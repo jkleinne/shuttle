@@ -48,9 +48,22 @@ type ItemResult struct {
 
 // JobResult groups the item-level outcomes for a named sync job or cloud remote.
 type JobResult struct {
-	// Name is the sync job name (e.g. "manga") or "cloud:remote_name".
-	Name  string
-	Items []ItemResult
+	// Name is the sync job name from the config (e.g. "manga", "docs-to-cloud").
+	Name string
+	// Remote is the rclone remote name for cloud jobs (e.g. "crypt_gdrive").
+	// Empty for rsync jobs.
+	Remote string
+	Items  []ItemResult
+}
+
+// jobLabel returns a display-friendly identifier for a job result.
+// For rclone jobs with a remote, it returns "name:remote".
+// For rsync jobs (remote is empty), it returns just the name.
+func jobLabel(name, remote string) string {
+	if remote != "" {
+		return name + ":" + remote
+	}
+	return name
 }
 
 // Summary is the top-level result returned after a full sync run.
@@ -321,7 +334,7 @@ func RenderSummary(w io.Writer, s Summary) {
 	}
 	fmt.Fprintln(w, "=== Sync Summary ===")
 	for _, job := range s.Jobs {
-		fmt.Fprintf(w, "%s:\n", job.Name)
+		fmt.Fprintf(w, "%s:\n", jobLabel(job.Name, job.Remote))
 		for _, item := range job.Items {
 			fmt.Fprintf(w, "  %s: %s\n", item.Name, FormatItemStats(item))
 		}

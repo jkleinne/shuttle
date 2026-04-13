@@ -214,6 +214,24 @@ func TestRenderSummary_ErrorSection(t *testing.T) {
 	}
 }
 
+func TestJobLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		remote string
+		want   string
+	}{
+		{"manga", "", "manga"},
+		{"docs-to-cloud", "crypt_gdrive", "docs-to-cloud:crypt_gdrive"},
+		{"backup", "koofr", "backup:koofr"},
+	}
+	for _, tt := range tests {
+		got := jobLabel(tt.name, tt.remote)
+		if got != tt.want {
+			t.Errorf("jobLabel(%q, %q) = %q, want %q", tt.name, tt.remote, got, tt.want)
+		}
+	}
+}
+
 func TestRenderSummary_GroupsByJobName(t *testing.T) {
 	summary := Summary{
 		Jobs: []JobResult{
@@ -226,8 +244,9 @@ func TestRenderSummary_GroupsByJobName(t *testing.T) {
 				},
 			},
 			{
-				Name: "documents-to-cloud:crypt_gdrive",
-				Items: []ItemResult{
+				Name:   "documents-to-cloud",
+				Remote: "crypt_gdrive",
+				Items:  []ItemResult{
 					{Name: "Documents", Status: StatusOK, Stats: TransferStats{
 						FilesChecked: 50, FilesTransferred: 3,
 						BytesSent: "12.3 MiB", Speed: "2.1 MiB/s",
