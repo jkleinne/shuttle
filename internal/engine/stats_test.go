@@ -98,6 +98,91 @@ func TestParseRcloneStats_WithTransfers(t *testing.T) {
 	}
 }
 
+func TestFormatTransfer(t *testing.T) {
+	tests := []struct {
+		name  string
+		stats TransferStats
+		want  string
+	}{
+		{
+			"typical rsync",
+			TransferStats{FilesTransferred: 42, BytesSent: "3.10K", Speed: "6.27K/s"},
+			"42 transferred, 3.10K sent at 6.27K/s",
+		},
+		{
+			"rclone with units",
+			TransferStats{FilesTransferred: 5, BytesSent: "12.3 MiB", Speed: "2.1 MiB/s"},
+			"5 transferred, 12.3 MiB sent at 2.1 MiB/s",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatTransfer(tt.stats)
+			if got != tt.want {
+				t.Errorf("formatTransfer() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatChecked(t *testing.T) {
+	tests := []struct {
+		name  string
+		stats TransferStats
+		want  string
+	}{
+		{
+			"zero elapsed",
+			TransferStats{FilesChecked: 919, Elapsed: 0},
+			"919 checked",
+		},
+		{
+			"sub-second elapsed",
+			TransferStats{FilesChecked: 4, Elapsed: 500 * time.Millisecond},
+			"4 checked",
+		},
+		{
+			"elapsed at threshold",
+			TransferStats{FilesChecked: 3258, Elapsed: 1 * time.Second},
+			"3,258 checked (1s)",
+		},
+		{
+			"elapsed above threshold",
+			TransferStats{FilesChecked: 55259, Elapsed: 36 * time.Second},
+			"55,259 checked (36s)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatChecked(tt.stats)
+			if got != tt.want {
+				t.Errorf("formatChecked() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatNumber(t *testing.T) {
+	tests := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{5, "5"},
+		{999, "999"},
+		{1000, "1,000"},
+		{14101, "14,101"},
+		{55259, "55,259"},
+		{1000000, "1,000,000"},
+	}
+	for _, tt := range tests {
+		got := formatNumber(tt.n)
+		if got != tt.want {
+			t.Errorf("formatNumber(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		d    time.Duration
@@ -141,79 +226,6 @@ func TestSummary_HasErrors_ReturnsTrue_WhenAnyFailed(t *testing.T) {
 	}
 }
 
-func TestFormatItemStats_UpToDate(t *testing.T) {
-	r := ItemResult{Status: StatusOK, Stats: TransferStats{
-		FilesChecked: 100, Elapsed: 5 * time.Second,
-	}}
-	got := FormatItemStats(r)
-	// StatusOK with no transfers renders as "N checked (Ts)".
-	if !strings.Contains(got, "checked") {
-		t.Errorf("expected 'checked', got %q", got)
-	}
-	if strings.Contains(got, "transferred") {
-		t.Errorf("expected no 'transferred' in up-to-date output, got %q", got)
-	}
-}
-
-func TestFormatItemStats_WithTransfers(t *testing.T) {
-	r := ItemResult{Status: StatusOK, Stats: TransferStats{
-		FilesChecked: 50, FilesTransferred: 3, BytesSent: "12.3 MiB",
-		Speed: "2.1 MiB/s", Elapsed: 15 * time.Second,
-	}}
-	got := FormatItemStats(r)
-	if !strings.Contains(got, "3 transferred") {
-		t.Errorf("expected '3 transferred', got %q", got)
-	}
-	if !strings.Contains(got, "12.3 MiB") {
-		t.Errorf("expected bytes, got %q", got)
-	}
-}
-
-func TestFormatItemStats_Failed(t *testing.T) {
-	r := ItemResult{Status: StatusFailed, Stats: TransferStats{
-		FilesTransferred: 1, Elapsed: 3 * time.Second,
-	}}
-	got := FormatItemStats(r)
-	// FormatItemStats returns "[failed]" for StatusFailed.
-	if !strings.Contains(got, "failed") {
-		t.Errorf("expected 'failed', got %q", got)
-	}
-}
-
-func TestFormatItemStats_Skipped(t *testing.T) {
-	r := ItemResult{Status: StatusSkipped}
-	got := FormatItemStats(r)
-	if !strings.Contains(got, "skipped") {
-		t.Errorf("expected 'skipped', got %q", got)
-	}
-}
-
-func TestRenderSummary_DryRunNotice(t *testing.T) {
-	s := Summary{DryRun: true, Duration: 1 * time.Second}
-	var buf strings.Builder
-	RenderSummary(&buf, s)
-	// RenderSummary prepends "[DRY RUN]" when DryRun is true.
-	if !strings.Contains(buf.String(), "DRY RUN") {
-		t.Errorf("expected dry run notice, got %q", buf.String())
-	}
-}
-
-func TestRenderSummary_ErrorSection(t *testing.T) {
-	s := Summary{
-		Errors:   []string{"manga/source1", "docs-to-cloud:gdrive/Documents"},
-		Duration: 5 * time.Second,
-	}
-	var buf strings.Builder
-	RenderSummary(&buf, s)
-	out := buf.String()
-	if !strings.Contains(out, "Errors") {
-		t.Errorf("expected Errors section, got %q", out)
-	}
-	if !strings.Contains(out, "manga/source1") {
-		t.Errorf("expected error detail, got %q", out)
-	}
-}
-
 func TestJobLabel(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -232,43 +244,371 @@ func TestJobLabel(t *testing.T) {
 	}
 }
 
-func TestRenderSummary_GroupsByJobName(t *testing.T) {
-	summary := Summary{
+func TestRenderSummary_RsyncSingleSource_NoTransfers(t *testing.T) {
+	s := Summary{
 		Jobs: []JobResult{
-			{
-				Name: "manga",
-				Items: []ItemResult{
-					{Name: "Manga Sync", Status: StatusOK, Stats: TransferStats{
-						FilesChecked: 100, Elapsed: 5 * time.Second,
-					}},
-				},
-			},
-			{
-				Name:   "documents-to-cloud",
-				Remote: "crypt_gdrive",
-				Items:  []ItemResult{
-					{Name: "Documents", Status: StatusOK, Stats: TransferStats{
-						FilesChecked: 50, FilesTransferred: 3,
-						BytesSent: "12.3 MiB", Speed: "2.1 MiB/s",
-						Elapsed: 15 * time.Second,
-					}},
-				},
-			},
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{FilesChecked: 14101}},
+			}},
 		},
 		Duration: 30 * time.Second,
 	}
-
 	var buf strings.Builder
-	RenderSummary(&buf, summary)
+	RenderSummary(&buf, s, false)
 	out := buf.String()
 
-	if !strings.Contains(out, "manga:") {
-		t.Error("missing manga: header")
+	if !strings.Contains(out, "✓ manga") {
+		t.Error("missing success symbol + job name")
 	}
-	if !strings.Contains(out, "documents-to-cloud:crypt_gdrive:") {
-		t.Error("missing documents-to-cloud:crypt_gdrive: header")
+	if !strings.Contains(out, "14,101 checked") {
+		t.Error("missing thousand-separated checked count")
 	}
-	if !strings.Contains(out, "Duration: 30s") {
+	if strings.Contains(out, "transferred") {
+		t.Error("should not show transfer details when nothing transferred")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Error("missing footer tally")
+	}
+}
+
+func TestRenderSummary_RsyncSingleSource_WithTransfers(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{
+					FilesChecked: 14101, FilesTransferred: 42,
+					BytesSent: "3.10K", Speed: "6.27K/s",
+				}},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "14,101 checked") {
+		t.Error("missing checked count")
+	}
+	if !strings.Contains(out, "42 transferred, 3.10K sent at 6.27K/s") {
+		t.Error("missing transfer detail line")
+	}
+}
+
+func TestRenderSummary_RsyncMultipleSources(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{
+					FilesChecked: 14101, FilesTransferred: 42,
+					BytesSent: "3.10K", Speed: "6.27K/s",
+				}},
+				{Name: ".minisig", Status: StatusOK, Stats: TransferStats{FilesChecked: 3}},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "mangas:") {
+		t.Error("missing source name for multi-source job")
+	}
+	if !strings.Contains(out, ".minisig:") {
+		t.Error("missing second source name")
+	}
+	if !strings.Contains(out, "42 transferred") {
+		t.Error("missing transfer detail under first source")
+	}
+}
+
+func TestRenderSummary_RcloneCollapsed(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "ebooks-to-cloud", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "ebooks", Status: StatusOK, Stats: TransferStats{FilesChecked: 919}},
+			}},
+			{Name: "ebooks-to-cloud", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "ebooks", Status: StatusOK, Stats: TransferStats{FilesChecked: 919}},
+			}},
+		},
+		Duration: 10 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "2 remotes") {
+		t.Error("collapsed group should show remote count")
+	}
+	if !strings.Contains(out, "919 checked") {
+		t.Error("collapsed group should show shared checked count")
+	}
+	if strings.Contains(out, "crypt_gdrive") {
+		t.Error("collapsed group should not show individual remote names")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Error("rclone group should count as one job in tally")
+	}
+}
+
+func TestRenderSummary_RcloneCollapsed_ShowsMaxElapsed(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "docs", Remote: "gdrive", Items: []ItemResult{
+				{Name: "d", Status: StatusOK, Stats: TransferStats{FilesChecked: 100, Elapsed: 0}},
+			}},
+			{Name: "docs", Remote: "koofr", Items: []ItemResult{
+				{Name: "d", Status: StatusOK, Stats: TransferStats{FilesChecked: 100, Elapsed: 12 * time.Second}},
+			}},
+		},
+		Duration: 15 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "100 checked (12s)") {
+		t.Errorf("collapsed group should show max elapsed, got:\n%s", out)
+	}
+}
+
+func TestRenderSummary_RcloneExpanded_DifferentChecked(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "docs-to-cloud", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "Documents", Status: StatusOK, Stats: TransferStats{FilesChecked: 1350}},
+			}},
+			{Name: "docs-to-cloud", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "Documents", Status: StatusOK, Stats: TransferStats{
+					FilesChecked: 3258, Elapsed: 12 * time.Second,
+				}},
+			}},
+		},
+		Duration: 15 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "2 remotes") {
+		t.Error("expanded group should show remote count")
+	}
+	if !strings.Contains(out, "├ crypt_gdrive") {
+		t.Error("missing tree branch for first remote")
+	}
+	if !strings.Contains(out, "└ crypt_koofr") {
+		t.Error("missing tree branch for last remote")
+	}
+	if !strings.Contains(out, "1,350 checked") {
+		t.Error("missing first remote stats")
+	}
+	if !strings.Contains(out, "3,258 checked (12s)") {
+		t.Error("missing second remote stats with elapsed")
+	}
+}
+
+func TestRenderSummary_RcloneExpanded_WithTransfers(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "docs-to-cloud", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "Documents", Status: StatusOK, Stats: TransferStats{
+					FilesChecked: 1350, FilesTransferred: 5,
+					BytesSent: "12.3 MiB", Speed: "2.1 MiB/s",
+				}},
+			}},
+			{Name: "docs-to-cloud", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "Documents", Status: StatusOK, Stats: TransferStats{
+					FilesChecked: 3258, Elapsed: 12 * time.Second,
+				}},
+			}},
+		},
+		Duration: 20 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "5 transferred, 12.3 MiB sent at 2.1 MiB/s") {
+		t.Error("missing transfer detail under first remote")
+	}
+	if !strings.Contains(out, "│") {
+		t.Error("transfer detail should have pipe continuation from tree")
+	}
+}
+
+func TestRenderSummary_RcloneSingleRemote(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "backup", Remote: "gdrive", Items: []ItemResult{
+				{Name: "data", Status: StatusOK, Stats: TransferStats{FilesChecked: 50}},
+			}},
+		},
+		Duration: 2 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "gdrive") {
+		t.Error("single-remote group should show remote name")
+	}
+	if !strings.Contains(out, "50 checked") {
+		t.Error("missing checked count")
+	}
+}
+
+func TestRenderSummary_RcloneGroupWithNotFound(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "docs-to-cloud", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "Documents", Status: StatusNotFound},
+			}},
+			{Name: "docs-to-cloud", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "Documents", Status: StatusOK, Stats: TransferStats{FilesChecked: 3258}},
+			}},
+		},
+		Errors:   []string{"docs-to-cloud:crypt_gdrive/Documents"},
+		Duration: 10 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "✗ docs-to-cloud") {
+		t.Error("group with a failed remote should show ✗ symbol")
+	}
+	if !strings.Contains(out, "not found") {
+		t.Error("not-found remote should show 'not found'")
+	}
+	if !strings.Contains(out, "1 failed") {
+		t.Error("group should count as failed in tally")
+	}
+}
+
+func TestRenderSummary_FailedAndNotFound(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+			}},
+			{Name: "koreader", Items: []ItemResult{
+				{Name: "koreader", Status: StatusNotFound},
+			}},
+		},
+		Errors:   []string{"koreader/koreader"},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "✗ koreader") {
+		t.Error("failed job should show ✗ symbol")
+	}
+	if !strings.Contains(out, "not found") {
+		t.Error("not-found item should show 'not found'")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Error("incorrect passed count")
+	}
+	if !strings.Contains(out, "1 failed") {
+		t.Error("incorrect failed count")
+	}
+	if !strings.Contains(out, "Errors:") {
+		t.Error("missing errors section")
+	}
+}
+
+func TestRenderSummary_SkippedJob(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+			}},
+			{Name: "secrets", Items: []ItemResult{
+				{Name: "secrets", Status: StatusSkipped},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "– secrets") {
+		t.Error("skipped job should show – symbol")
+	}
+	if !strings.Contains(out, "skipped") {
+		t.Error("skipped job should show 'skipped'")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Error("skipped jobs should not count in tally")
+	}
+	if strings.Contains(out, "failed") {
+		t.Error("tally should omit failed count when zero")
+	}
+}
+
+func TestRenderSummary_DryRun(t *testing.T) {
+	s := Summary{DryRun: true, Duration: 1 * time.Second}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "[DRY RUN]") {
+		t.Error("missing dry run notice")
+	}
+	if !strings.Contains(out, "Sync Summary") {
+		t.Error("missing header")
+	}
+}
+
+func TestRenderSummary_FooterOmitsFailedWhenZero(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{FilesChecked: 10}},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if strings.Contains(out, "failed") {
+		t.Error("footer should omit 'failed' when zero")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Error("missing passed count")
+	}
+	if !strings.Contains(out, "Duration: 5s") {
 		t.Error("missing duration")
+	}
+}
+
+func TestRenderSummary_WithColor(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "manga", Items: []ItemResult{
+				{Name: "mangas", Status: StatusOK, Stats: TransferStats{FilesChecked: 10}},
+			}},
+		},
+		Duration: 1 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, true)
+	out := buf.String()
+
+	if !strings.Contains(out, "\033[") {
+		t.Error("color output should contain ANSI escape codes")
+	}
+	if !strings.Contains(out, ansiGreen) {
+		t.Error("success symbol should use green")
+	}
+	if !strings.Contains(out, ansiBold+ansiBlue) {
+		t.Error("header should use bold blue")
 	}
 }
