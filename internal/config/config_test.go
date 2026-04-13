@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jkleinne/sync-station/internal/config"
+	"github.com/jkleinne/shuttle/internal/config"
 )
 
 func testdataPath(name string) string {

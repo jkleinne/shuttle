@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jkleinne/sync-station/internal/log"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 // rsyncBaseOpts are the fixed flags passed to every rsync invocation.

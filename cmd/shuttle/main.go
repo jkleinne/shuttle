@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/jkleinne/sync-station/internal/config"
-	"github.com/jkleinne/sync-station/internal/engine"
-	"github.com/jkleinne/sync-station/internal/log"
+	"github.com/jkleinne/shuttle/internal/config"
+	"github.com/jkleinne/shuttle/internal/engine"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 // version is set at build time via -ldflags; defaults to "dev" for local builds.

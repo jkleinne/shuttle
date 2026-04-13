@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jkleinne/sync-station/internal/log"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 func TestLogger_WritesToBothStreams(t *testing.T) {
