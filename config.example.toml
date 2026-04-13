@@ -2,8 +2,9 @@
 # Location: ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml
 
 # -- Default flags for each engine (optional) --
-# No flags are hardcoded in the binary. These defaults apply to all
-# jobs of the corresponding engine type. Per-job fields override defaults.
+# Shuttle injects a small set of instrumentation flags (--stats, progress)
+# for stats capture. All other flags come from these defaults or per-job
+# extra_flags. Per-job fields override defaults via last-flag-wins.
 
 [defaults.rsync]
 flags = ["-a", "-v", "-h", "-P", "-u", "--exclude=.DS_Store"]

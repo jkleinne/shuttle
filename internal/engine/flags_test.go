@@ -106,7 +106,7 @@ func TestBuildRcloneArgs_DefaultsAndOverrides(t *testing.T) {
 		Bwlimit:    "2M", // per-job override
 		ExtraFlags: []string{"--track-renames"},
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src/", "remote:dst/", true, false, "/tmp/log", "")
+	args := BuildRcloneArgs("copy", defaults, job, "/src/", "remote:dst/", false, "/tmp/log", "")
 	joined := strings.Join(args, " ")
 
 	// Subcommand is first.
@@ -148,7 +148,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 	job := config.Job{
 		FilterFile: "/job/filters.txt",
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src", "remote:dst", true, false, "/tmp/log", "")
+	args := BuildRcloneArgs("copy", defaults, job, "/src", "remote:dst", false, "/tmp/log", "")
 	// The job-level filter file should be used; the default must not appear.
 	found := false
 	for i, a := range args {
@@ -167,7 +167,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", true, false, "/tmp/log", "")
+	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", false, "/tmp/log", "")
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--stats 1s") {
 		t.Error("missing instrumentation --stats 1s")
@@ -184,7 +184,7 @@ func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_BackupDir(t *testing.T) {
-	args := BuildRcloneArgs("sync", nil, config.Job{}, "/src", "remote:dst", true, false, "", "remote:_archive/2026-01-01/dst/")
+	args := BuildRcloneArgs("sync", nil, config.Job{}, "/src", "remote:dst", false, "", "remote:_archive/2026-01-01/dst/")
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--backup-dir remote:_archive/2026-01-01/dst/") {
 		t.Errorf("missing --backup-dir in args: %q", joined)
@@ -192,7 +192,7 @@ func TestBuildRcloneArgs_BackupDir(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_DryRun(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", true, true, "", "")
+	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", true, "", "")
 	found := false
 	for _, a := range args {
 		if a == "--dry-run" {

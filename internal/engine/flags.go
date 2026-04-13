@@ -67,7 +67,7 @@ func BuildRsyncArgs(defaults *config.RsyncDefaults, job config.Job, source, dest
 // Per-job tuning overrides appear after default tuning so rclone's last-flag-wins
 // behaviour applies. backupDirArg is the pre-built "--backup-dir" value (or empty
 // to omit it); the caller is responsible for constructing this string.
-func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job config.Job, source, destination string, isDir, dryRun bool, logFile string, backupDirArg string) []string {
+func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job config.Job, source, destination string, dryRun bool, logFile string, backupDirArg string) []string {
 	args := make([]string, 0, 40)
 
 	// The subcommand (copy/sync) is always first.
@@ -140,7 +140,7 @@ func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string
 
 	for _, flag := range userFlags {
 		for _, key := range keys {
-			if flag == key || strings.HasPrefix(flag, key+"=") || strings.HasPrefix(flag, key+" ") {
+			if flag == key || strings.HasPrefix(flag, key+"=") {
 				logger.Warn(fmt.Sprintf(
 					"flag %q conflicts with Shuttle's instrumentation; stats capture may be affected",
 					flag,

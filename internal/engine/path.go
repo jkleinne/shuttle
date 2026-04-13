@@ -9,10 +9,10 @@ import (
 	"strings"
 )
 
-// expandPath stats the given path and returns whether it's a directory.
+// statPath stats the given path and returns whether it's a directory.
 // Tilde expansion is handled by the config package at parse time, so
 // paths arriving here are already absolute.
-func expandPath(source string) (resolved string, isDir bool, err error) {
+func statPath(source string) (resolved string, isDir bool, err error) {
 	info, err := os.Stat(source)
 	if err != nil {
 		return "", false, fmt.Errorf("stat %s: %w", source, err)

@@ -83,10 +83,24 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 			jobs = append(jobs, jobResult)
 
 		case config.EngineRclone:
+			var rcloneDefaults *config.RcloneDefaults
+			if r.cfg.Defaults != nil {
+				rcloneDefaults = r.cfg.Defaults.Rclone
+			}
+			WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
 			remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
+			if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
+				jobs = append(jobs, JobResult{
+					Name:  job.Name,
+					Items: []ItemResult{{Name: job.Name, Status: StatusSkipped}},
+				})
+				continue
+			}
 			for _, remote := range remotes {
 				r.logger.Header(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
-				r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun)
+				if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
+					r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
+				}
 				jobResult := r.runRcloneJob(ctx, job, remote, timestamp)
 				jobs = append(jobs, jobResult)
 			}
@@ -121,7 +135,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 	WarnFlagConflicts(r.logger, "rsync", collectRsyncUserFlags(defaults, job))
 
 	for _, source := range job.Sources {
-		resolved, isDir, err := expandPath(source)
+		resolved, isDir, err := statPath(source)
 		if err != nil {
 			r.logger.Error(fmt.Sprintf("Source not found: %s: %v", source, err))
 			items = append(items, ItemResult{
@@ -142,13 +156,12 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 }
 
 // runRcloneJob runs rclone for a single source against a single remote.
+// WarnFlagConflicts is called by the caller (Run) once per job, not here.
 func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, timestamp string) JobResult {
 	var rcloneDefaults *config.RcloneDefaults
 	if r.cfg.Defaults != nil {
 		rcloneDefaults = r.cfg.Defaults.Rclone
 	}
-
-	WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
 
 	source := job.Source
 	isRemote := isRcloneRemote(source)
@@ -157,7 +170,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	if isRemote {
 		isDir = true
 	} else {
-		_, isDirStat, err := expandPath(source)
+		_, isDirStat, err := statPath(source)
 		if err != nil {
 			r.logger.Error(fmt.Sprintf("Skipping %s: %v", source, err))
 			return JobResult{
@@ -191,7 +204,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	r.logger.Info(fmt.Sprintf("Destination: %s", destination))
 
 	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
-	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, isDir, r.dryRun, r.logFile, backupDirArg)
+	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 
 	result := r.rclone.Exec(ctx, args)
 	result.Name = destName
