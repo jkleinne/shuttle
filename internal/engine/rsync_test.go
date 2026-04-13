@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jkleinne/sync-station/internal/log"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 func newTestLogger(t *testing.T) *log.Logger {

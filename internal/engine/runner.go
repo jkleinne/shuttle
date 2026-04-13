@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jkleinne/sync-station/internal/config"
-	"github.com/jkleinne/sync-station/internal/log"
+	"github.com/jkleinne/shuttle/internal/config"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 const lockFilePath = "/tmp/sync-station.lock"

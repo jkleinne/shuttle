@@ -1,4 +1,4 @@
-module github.com/jkleinne/sync-station
+module github.com/jkleinne/shuttle
 
 go 1.26.2
 
