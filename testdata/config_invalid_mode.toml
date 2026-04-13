@@ -1,7 +1,6 @@
-external_drive = "/tmp/test"
-[cloud]
-mode = "mirror"
-[[cloud.remotes]]
-name = "test"
-[[cloud.items]]
+[[job]]
+name = "bad-mode"
+engine = "rclone"
 source = "/tmp/a"
+remotes = ["test"]
+mode = "mirror"

@@ -1,9 +1,11 @@
-external_drive = "/tmp/test"
-[[sync]]
+[[job]]
 name = "dupe"
+engine = "rsync"
 sources = ["/tmp/a"]
 destination = "/tmp/b"
-[[sync]]
+
+[[job]]
 name = "dupe"
+engine = "rsync"
 sources = ["/tmp/c"]
 destination = "/tmp/d"
