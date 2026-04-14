@@ -59,6 +59,34 @@ func NewRunner(cfg *config.Config, configPath string, logger *log.Logger, pw *Pr
 	}
 }
 
+// logHeader writes a section header. In interactive mode, output goes to the
+// log file only so it doesn't interleave with the live spinner.
+func (r *Runner) logHeader(msg string) {
+	if r.pw.Interactive() {
+		r.logger.FileHeader(msg)
+	} else {
+		r.logger.Header(msg)
+	}
+}
+
+// logInfo writes an informational message, routed like logHeader.
+func (r *Runner) logInfo(msg string) {
+	if r.pw.Interactive() {
+		r.logger.FileInfo(msg)
+	} else {
+		r.logger.Info(msg)
+	}
+}
+
+// logError writes an error message, routed like logHeader.
+func (r *Runner) logError(msg string) {
+	if r.pw.Interactive() {
+		r.logger.FileError(msg)
+	} else {
+		r.logger.Error(msg)
+	}
+}
+
 // Run executes the full pipeline: prerequisites, lock, jobs, summary.
 // Partial failures are recorded in the summary but do not stop subsequent jobs.
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
@@ -87,11 +115,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 
 		switch job.Engine {
 		case config.EngineRsync:
-			if r.pw.Interactive() {
-				r.logger.FileHeader(fmt.Sprintf("Syncing: %s", job.Name))
-			} else {
-				r.logger.Header(fmt.Sprintf("Syncing: %s", job.Name))
-			}
+			r.logHeader(fmt.Sprintf("Syncing: %s", job.Name))
 			jobResult := r.runRsyncJob(ctx, job)
 			jobs = append(jobs, jobResult)
 
@@ -111,11 +135,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 				continue
 			}
 			for _, remote := range remotes {
-				if r.pw.Interactive() {
-					r.logger.FileHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
-				} else {
-					r.logger.Header(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
-				}
+				r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
 				if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
 					r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
 				}
@@ -161,11 +181,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			if multiSource {
 				label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(source))
 			}
-			if r.pw.Interactive() {
-				r.logger.FileError(fmt.Sprintf("Source not found: %s: %v", source, err))
-			} else {
-				r.logger.Error(fmt.Sprintf("Source not found: %s: %v", source, err))
-			}
+			r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
 			notFound := ItemResult{
 				Name:   filepath.Base(source),
 				Status: StatusNotFound,
@@ -181,23 +197,13 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(resolved))
 		}
 
-		if r.pw.Interactive() {
-			r.logger.FileInfo(fmt.Sprintf("Source: %s", resolved))
-			r.logger.FileInfo(fmt.Sprintf("Destination: %s", job.Destination))
-		} else {
-			r.logger.Info(fmt.Sprintf("Source: %s", resolved))
-			r.logger.Info(fmt.Sprintf("Destination: %s", job.Destination))
-		}
+		r.logInfo(fmt.Sprintf("Source: %s", resolved))
+		r.logInfo(fmt.Sprintf("Destination: %s", job.Destination))
 
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
 
-		var onProgress func(string)
-		if r.pw.Interactive() {
-			onProgress = r.pw.UpdateProgress
-		}
-
 		r.pw.StartJob(ctx, label)
-		result := r.rsync.Exec(ctx, args, onProgress)
+		result := r.rsync.Exec(ctx, args, r.pw.ProgressCallback())
 		r.pw.FinishJob(result)
 		items = append(items, result)
 	}
@@ -222,11 +228,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	} else {
 		_, isDirStat, err := statPath(source)
 		if err != nil {
-			if r.pw.Interactive() {
-				r.logger.FileError(fmt.Sprintf("Skipping %s: %v", source, err))
-			} else {
-				r.logger.Error(fmt.Sprintf("Skipping %s: %v", source, err))
-			}
+			r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
 			notFound := ItemResult{
 				Name:   filepath.Base(source),
 				Status: StatusNotFound,
@@ -258,24 +260,14 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 		source += "/"
 	}
 
-	if r.pw.Interactive() {
-		r.logger.FileInfo(fmt.Sprintf("Source: %s", source))
-		r.logger.FileInfo(fmt.Sprintf("Destination: %s", destination))
-	} else {
-		r.logger.Info(fmt.Sprintf("Source: %s", source))
-		r.logger.Info(fmt.Sprintf("Destination: %s", destination))
-	}
+	r.logInfo(fmt.Sprintf("Source: %s", source))
+	r.logInfo(fmt.Sprintf("Destination: %s", destination))
 
 	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 
-	var onProgress func(string)
-	if r.pw.Interactive() {
-		onProgress = r.pw.UpdateProgress
-	}
-
 	r.pw.StartJob(ctx, label)
-	result := r.rclone.Exec(ctx, args, onProgress)
+	result := r.rclone.Exec(ctx, args, r.pw.ProgressCallback())
 	result.Name = destName
 	if destName == "" {
 		result.Name = "(prefix root)"

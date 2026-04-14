@@ -21,6 +21,8 @@ const (
 	ansiBlue   = "\033[34m"
 )
 
+const ansiClearLine = "\033[2K\r"
+
 const summaryDivider = "─────────────────────────────────────────────"
 
 // colorize wraps text in ANSI escape codes when color is enabled.
