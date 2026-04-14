@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,8 +41,12 @@ type Runner struct {
 
 // NewRunner creates a Runner for the given config. configPath is the
 // absolute path to the config file (used for per-config locking).
-// pw controls live terminal progress display; pass nil to disable progress output.
+// pw controls live terminal progress display. If nil, a non-interactive
+// writer is created that prints plain status lines to io.Discard.
 func NewRunner(cfg *config.Config, configPath string, logger *log.Logger, pw *ProgressWriter, dryRun bool, logFile string) *Runner {
+	if pw == nil {
+		pw = NewProgressWriter(io.Discard, false, false)
+	}
 	return &Runner{
 		cfg:        cfg,
 		configPath: configPath,
