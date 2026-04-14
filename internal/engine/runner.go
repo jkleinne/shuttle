@@ -153,7 +153,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 
 	for _, j := range jobs {
 		for _, item := range j.Items {
-			if item.Status == StatusFailed {
+			if item.Status == StatusFailed || item.Status == StatusNotFound {
 				summary.Errors = append(summary.Errors, fmt.Sprintf("%s/%s", jobLabel(j.Name, j.Remote), item.Name))
 			}
 		}

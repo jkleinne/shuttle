@@ -226,6 +226,20 @@ func TestSummary_HasErrors_ReturnsTrue_WhenAnyFailed(t *testing.T) {
 	}
 }
 
+func TestSummary_HasErrors_ReturnsTrue_WhenAnyNotFound(t *testing.T) {
+	// StatusNotFound (source path missing) is a failure condition equivalent to
+	// StatusFailed. HasErrors must include it so the CLI exits with code 1.
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "job1", Items: []ItemResult{{Status: StatusOK}}},
+			{Name: "job2", Items: []ItemResult{{Status: StatusNotFound}}},
+		},
+	}
+	if !s.HasErrors() {
+		t.Error("HasErrors() = false, want true for StatusNotFound")
+	}
+}
+
 func TestJobLabel(t *testing.T) {
 	tests := []struct {
 		name   string
