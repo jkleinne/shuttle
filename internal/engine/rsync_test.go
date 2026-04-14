@@ -43,7 +43,10 @@ func TestRsyncExec_TransfersFiles(t *testing.T) {
 	if result.Stats.FilesTransferred != 1 {
 		t.Errorf("FilesTransferred = %d, want 1", result.Stats.FilesTransferred)
 	}
-	content, _ := os.ReadFile(filepath.Join(dst, "hello.txt"))
+	content, err := os.ReadFile(filepath.Join(dst, "hello.txt"))
+	if err != nil {
+		t.Fatalf("reading synced file: %v", err)
+	}
 	if string(content) != "world" {
 		t.Errorf("file content = %q, want world", string(content))
 	}
@@ -65,7 +68,10 @@ func TestRsyncExec_DryRun_DoesNotTransfer(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
 	}
-	entries, _ := os.ReadDir(dst)
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("reading dst directory: %v", err)
+	}
 	if len(entries) != 0 {
 		t.Errorf("dst has %d entries, want 0 (dry run)", len(entries))
 	}

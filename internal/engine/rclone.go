@@ -69,7 +69,7 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 // because rclone uses \r for in-place updates during transfers.
 func scanRcloneProgress(r io.Reader, onProgress func(string)) {
 	if onProgress == nil {
-		io.Copy(io.Discard, r) //nolint:errcheck
+		_, _ = io.Copy(io.Discard, r)
 		return
 	}
 
