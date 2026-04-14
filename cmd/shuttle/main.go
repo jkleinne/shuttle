@@ -17,8 +17,14 @@ import (
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
-// version is set at build time via -ldflags; defaults to "dev" for local builds.
-var version = "dev"
+// version, commit, and date are set at build time via -ldflags. They default
+// to placeholder values so local `go build` invocations still produce a
+// runnable binary with an honest "unknown" label.
+var (
+	version = "dev"
+	commit  = "unknown"
+	date    = "unknown"
+)
 
 func main() {
 	os.Exit(run())
@@ -56,6 +62,8 @@ func run() int {
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Printf("shuttle %s\n", version)
+			fmt.Printf("commit: %s\n", commit)
+			fmt.Printf("built:  %s\n", date)
 		},
 	}
 
