@@ -381,7 +381,7 @@ func (r *Runner) acquireLock() error {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("another instance is already running (lock: %s)", lockPath)
 	}
 	r.lockFile = f

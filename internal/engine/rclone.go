@@ -269,7 +269,7 @@ func countLines(path string) int {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	count := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -287,7 +287,7 @@ func readLinesAfter(path string, startLine int) []byte {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var result []byte
 	scanner := bufio.NewScanner(f)

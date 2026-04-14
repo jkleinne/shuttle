@@ -104,7 +104,9 @@ func (pw *ProgressWriter) FinishJob(result ItemResult) {
 	if pw.interactive {
 		close(pw.done)
 		pw.wg.Wait()
-		fmt.Fprint(pw.w, ansiClearLine)
+		// Terminal write errors are unrecoverable at this call site; the write
+		// is best-effort output and no meaningful recovery action is possible.
+		_, _ = fmt.Fprint(pw.w, ansiClearLine)
 	}
 
 	pw.mu.Lock()
@@ -113,10 +115,10 @@ func (pw *ProgressWriter) FinishJob(result ItemResult) {
 
 	symbol := statusSymbol(result.Status, pw.useColor)
 	stats := itemStatsText(result, pw.useColor)
-	fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, label, stats)
+	_, _ = fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, label, stats)
 
 	if result.Status == StatusOK && result.Stats.FilesTransferred > 0 {
-		fmt.Fprintf(pw.w, "    %s\n",
+		_, _ = fmt.Fprintf(pw.w, "    %s\n",
 			colorize(pw.useColor, ansiGreen, formatTransfer(result.Stats)))
 	}
 }
@@ -125,7 +127,7 @@ func (pw *ProgressWriter) FinishJob(result ItemResult) {
 // Safe to call without a preceding StartJob.
 func (pw *ProgressWriter) SkipJob(name string) {
 	symbol := statusSymbol(StatusSkipped, pw.useColor)
-	fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, name,
+	_, _ = fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, name,
 		colorize(pw.useColor, ansiYellow, "skipped"))
 }
 
@@ -170,5 +172,5 @@ func (pw *ProgressWriter) renderSpinner() {
 	coloredFrame := colorize(pw.useColor, ansiBlue, frame)
 	coloredProgress := colorize(pw.useColor, ansiDim, progress)
 
-	fmt.Fprintf(pw.w, "\033[2K\r%s %s  %s", coloredFrame, label, coloredProgress)
+	_, _ = fmt.Fprintf(pw.w, "\033[2K\r%s %s  %s", coloredFrame, label, coloredProgress)
 }

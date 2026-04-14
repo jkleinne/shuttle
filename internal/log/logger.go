@@ -58,7 +58,7 @@ func NewWithWriter(terminal io.Writer, logPath string, useColor bool) (*Logger, 
 // Close closes the underlying log file. Should be called via defer after New or NewWithWriter.
 func (l *Logger) Close() {
 	if l.file != nil {
-		l.file.Close()
+		_ = l.file.Close()
 	}
 }
 
@@ -129,7 +129,7 @@ func (l *Logger) termf(format string, args ...any) {
 	if !l.useColor {
 		msg = stripAnsi(msg)
 	}
-	fmt.Fprint(l.terminal, msg)
+	_, _ = fmt.Fprint(l.terminal, msg)
 }
 
 // filef formats msg with a timestamp prefix and writes it to the log file.
@@ -139,7 +139,7 @@ func (l *Logger) filef(format string, args ...any) {
 		return
 	}
 	ts := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Fprintf(l.file, "[%s] %s\n", ts, fmt.Sprintf(format, args...))
+	_, _ = fmt.Fprintf(l.file, "[%s] %s\n", ts, fmt.Sprintf(format, args...))
 }
 
 // stripAnsi removes ANSI escape sequences (e.g. "\033[31m") from s.

@@ -26,7 +26,9 @@ func newTestLogger(t *testing.T) *log.Logger {
 func TestRsyncExec_TransfersFiles(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
-	os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{}
@@ -50,7 +52,9 @@ func TestRsyncExec_TransfersFiles(t *testing.T) {
 func TestRsyncExec_DryRun_DoesNotTransfer(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
-	os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	args := BuildRsyncArgs(defaults, config.Job{}, src+"/", dst+"/", false, true, "")
@@ -70,8 +74,12 @@ func TestRsyncExec_DryRun_DoesNotTransfer(t *testing.T) {
 func TestRsyncExec_DeleteAfter_ForDirectories(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
-	os.WriteFile(filepath.Join(dst, "stale.txt"), []byte("remove me"), 0o644)
-	os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0o644)
+	if err := os.WriteFile(filepath.Join(dst, "stale.txt"), []byte("remove me"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{Delete: true}
@@ -94,8 +102,12 @@ func TestRsyncExec_DeleteAfter_ForDirectories(t *testing.T) {
 func TestRsyncExec_ExtraOpts_Applied(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
-	os.WriteFile(filepath.Join(src, "include.txt"), []byte("yes"), 0o644)
-	os.WriteFile(filepath.Join(src, ".hidden"), []byte("no"), 0o644)
+	if err := os.WriteFile(filepath.Join(src, "include.txt"), []byte("yes"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".hidden"), []byte("no"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{ExtraFlags: []string{"--exclude=.*"}}
