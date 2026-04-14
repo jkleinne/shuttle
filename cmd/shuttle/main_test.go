@@ -209,6 +209,7 @@ func TestCLI_MissingSource_PartialFailure(t *testing.T) {
 		t.Skip("rsync not found on PATH")
 	}
 	dst := t.TempDir()
+	missingSource := filepath.Join(t.TempDir(), "does-not-exist")
 	toml := fmt.Sprintf(`
 [defaults.rsync]
 flags = ["-a"]
@@ -216,9 +217,9 @@ flags = ["-a"]
 [[job]]
 name = "broken"
 engine = "rsync"
-sources = ["/nonexistent/path/that/does/not/exist"]
+sources = [%q]
 destination = %q
-`, dst)
+`, missingSource, dst)
 	env := writeConfig(t, toml)
 	result := runShuttle(t, env)
 	if result.exitCode != 1 {
