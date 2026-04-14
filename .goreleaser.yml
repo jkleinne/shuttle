@@ -89,3 +89,24 @@ release:
     name: shuttle
   draft: false
   prerelease: auto
+
+brews:
+  - name: shuttle
+    repository:
+      owner: jkleinne
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/jkleinne/shuttle"
+    description: "Personal backup and synchronization CLI orchestrating rsync and rclone via a single TOML config"
+    license: "MIT"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "brew: {{ .ProjectName }} {{ .Tag }}"
+    dependencies:
+      - name: rsync
+      - name: rclone
+    test: |
+      system "#{bin}/shuttle", "version"
+    skip_upload: auto
