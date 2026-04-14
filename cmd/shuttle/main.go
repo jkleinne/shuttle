@@ -106,20 +106,29 @@ func run() int {
 	err := rootCmd.ExecuteContext(ctx)
 
 	if signaled {
-		return 130
+		return exitSignal
 	}
 	if errors.Is(err, errPartialFailure) {
-		return 1
+		return exitPartialFailure
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 2
+		return exitUsageError
 	}
-	return 0
+	return exitSuccess
 }
 
+// Exit codes returned by Execute. These form part of the public CLI contract
+// consumed by cron, launchd, and shell scripts wrapping shuttle.
+const (
+	exitSuccess        = 0
+	exitPartialFailure = 1
+	exitUsageError     = 2
+	exitSignal         = 130 // Unix convention: 128 + SIGINT
+)
+
 // errPartialFailure is the sentinel returned by executeRun when at least one
-// sync item failed. The caller maps it to exit code 1.
+// sync item failed. The caller maps it to exitPartialFailure.
 var errPartialFailure = fmt.Errorf("one or more tasks failed")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
