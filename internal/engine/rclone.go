@@ -69,7 +69,7 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 // because rclone uses \r for in-place updates during transfers.
 func scanRcloneProgress(r io.Reader, onProgress func(string)) {
 	if onProgress == nil {
-		io.Copy(io.Discard, r) //nolint:errcheck
+		_, _ = io.Copy(io.Discard, r)
 		return
 	}
 
@@ -269,7 +269,7 @@ func countLines(path string) int {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	count := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -287,7 +287,7 @@ func readLinesAfter(path string, startLine int) []byte {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var result []byte
 	scanner := bufio.NewScanner(f)
