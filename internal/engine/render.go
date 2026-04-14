@@ -190,19 +190,19 @@ func renderRsyncJob(w io.Writer, job JobResult, nameWidth int, useColor bool) {
 	if len(job.Items) == 1 {
 		item := job.Items[0]
 		stats := itemStatsText(item, useColor)
-		fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name, stats)
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
 		}
 		return
 	}
 
-	fmt.Fprintf(w, "  %s %s\n", symbol, job.Name)
+	_, _ = fmt.Fprintf(w, "  %s %s\n", symbol, job.Name)
 	for _, item := range job.Items {
 		stats := itemStatsText(item, useColor)
-		fmt.Fprintf(w, "      %s: %s\n", item.Name, stats)
+		_, _ = fmt.Fprintf(w, "      %s: %s\n", item.Name, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			fmt.Fprintf(w, "      %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "      %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
 		}
 	}
 }
@@ -222,9 +222,9 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 		if item.Status != StatusOK {
 			stats = itemStatsText(item, useColor)
 		}
-		fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name, stats)
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
 		}
 		return
 	}
@@ -234,12 +234,12 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 		elapsed := maxGroupElapsed(group)
 		collapsedStats := TransferStats{FilesChecked: checked, Elapsed: elapsed}
 		label := fmt.Sprintf("%d remotes · %s", len(group), formatChecked(collapsedStats))
-		fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
 			colorize(useColor, ansiDim, label))
 		return
 	}
 
-	fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
+	_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
 		colorize(useColor, ansiDim, fmt.Sprintf("%d remotes", len(group))))
 	for idx, jr := range group {
 		item := jr.Items[0]
@@ -251,10 +251,10 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 			pipe = " "
 		}
 		stats := itemStatsText(item, useColor)
-		fmt.Fprintf(w, "    %s %s  %s\n",
+		_, _ = fmt.Fprintf(w, "    %s %s  %s\n",
 			colorize(useColor, ansiDim, branch), jr.Remote, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			fmt.Fprintf(w, "    %s %s\n",
+			_, _ = fmt.Fprintf(w, "    %s %s\n",
 				colorize(useColor, ansiDim, pipe),
 				colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
 		}
@@ -264,7 +264,7 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 // renderSkippedJob writes a single skipped-job line.
 func renderSkippedJob(w io.Writer, job JobResult, nameWidth int, useColor bool) {
 	symbol := statusSymbol(StatusSkipped, useColor)
-	fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name,
+	_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name,
 		colorize(useColor, ansiYellow, "skipped"))
 }
 
@@ -288,12 +288,12 @@ func formatTally(passed, failed int, d time.Duration, useColor bool) string {
 // appear only when files were actually moved. Color output is controlled
 // by useColor; when false, plain text is emitted for log files and pipes.
 func RenderSummary(w io.Writer, s Summary, useColor bool) {
-	fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
-	fmt.Fprintln(w, colorize(useColor, ansiBold+ansiBlue, " Sync Summary"))
+	_, _ = fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
+	_, _ = fmt.Fprintln(w, colorize(useColor, ansiBold+ansiBlue, " Sync Summary"))
 	if s.DryRun {
-		fmt.Fprintln(w, colorize(useColor, ansiYellow, "  [DRY RUN]"))
+		_, _ = fmt.Fprintln(w, colorize(useColor, ansiYellow, "  [DRY RUN]"))
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
 	nameWidth := maxJobNameWidth(s.Jobs)
 	var passed, failed int
@@ -329,15 +329,15 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 		i++
 	}
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
-	fmt.Fprintln(w, formatTally(passed, failed, s.Duration, useColor))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
+	_, _ = fmt.Fprintln(w, formatTally(passed, failed, s.Duration, useColor))
 
 	if len(s.Errors) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, colorize(useColor, ansiRed, "  Errors:"))
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, colorize(useColor, ansiRed, "  Errors:"))
 		for _, e := range s.Errors {
-			fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiRed, "- "+e))
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiRed, "- "+e))
 		}
 	}
 }

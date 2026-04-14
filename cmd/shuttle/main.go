@@ -59,6 +59,24 @@ func run() int {
 		},
 	}
 
+	validateCmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Check configuration file for errors",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := config.ConfigPath()
+			if err != nil {
+				return err
+			}
+			if _, err := config.LoadFile(path); err != nil {
+				return err
+			}
+			fmt.Printf("config ok: %s\n", path)
+			return nil
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+
 	// Register the same flags on both root and run so both invocation styles
 	// (`shuttle --dry-run` and `shuttle run --dry-run`) accept them.
 	for _, cmd := range []*cobra.Command{rootCmd, runCmd} {
@@ -68,7 +86,7 @@ func run() int {
 		cmd.Flags().StringArrayVar(&selectedRemotes, "remote", nil, "Target specific cloud remote by name (repeatable)")
 	}
 
-	rootCmd.AddCommand(runCmd, versionCmd)
+	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
 
 	// Context wired to OS signals. The goroutine sets signaled before canceling
 	// so the exit-code check below can distinguish a signal from a normal error.

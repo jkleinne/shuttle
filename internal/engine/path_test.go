@@ -23,7 +23,9 @@ func TestStatPath_Directory(t *testing.T) {
 func TestStatPath_File(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "test.txt")
-	os.WriteFile(f, []byte("hello"), 0o644)
+	if err := os.WriteFile(f, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
 
 	resolved, isDir, err := statPath(f)
 	if err != nil {
