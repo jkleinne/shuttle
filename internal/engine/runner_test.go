@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,8 +66,9 @@ func TestLockFilePath_DifferentConfigs(t *testing.T) {
 	if r1.lockFilePath() != r3.lockFilePath() {
 		t.Error("same config path should produce same lock path")
 	}
-	if r1.lockFilePath()[:13] != "/tmp/shuttle-" {
-		t.Errorf("lock path should start with /tmp/shuttle-, got %q", r1.lockFilePath())
+	wantPrefix := filepath.Join(os.TempDir(), "shuttle-")
+	if !strings.HasPrefix(r1.lockFilePath(), wantPrefix) {
+		t.Errorf("lock path should start with %q, got %q", wantPrefix, r1.lockFilePath())
 	}
 }
 

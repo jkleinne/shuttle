@@ -388,11 +388,11 @@ func (r *Runner) acquireLock() error {
 	return nil
 }
 
-// lockFilePath returns /tmp/shuttle-<hash>.lock where hash is the first
+// lockFilePath returns <tempdir>/shuttle-<hash>.lock where hash is the first
 // 8 hex characters of SHA-256 of the absolute config file path.
 func (r *Runner) lockFilePath() string {
 	h := sha256.Sum256([]byte(r.configPath))
-	return fmt.Sprintf("/tmp/shuttle-%x.lock", h[:4])
+	return filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%x.lock", h[:4]))
 }
 
 // targetRemotes returns the intersection of the job's remotes and the

@@ -7,7 +7,8 @@
 # extra_flags. Per-job fields override defaults via last-flag-wins.
 
 [defaults.rsync]
-flags = ["-a", "-v", "-h", "-P", "-u", "--exclude=.DS_Store"]
+flags = ["-a", "-v", "-h", "-P", "-u"]
+# macOS users: add "--exclude=.DS_Store" to skip Finder metadata files
 
 [defaults.rclone]
 flags = ["--copy-links", "--fast-list", "--track-renames", "--track-renames-strategy", "modtime,size", "--update"]
@@ -31,8 +32,8 @@ order_by = "modtime,asc"
 [[job]]
 name = "photos"
 engine = "rsync"
-sources = ["~/Pictures/Photos/"]
-destination = "/Volumes/Backup/Photos/"
+sources = ["~/photos/"]
+destination = "/mnt/backup/photos/"
 delete = false
 extra_flags = ["--exclude=.*"]
 
@@ -41,10 +42,10 @@ extra_flags = ["--exclude=.*"]
 name = "projects"
 engine = "rsync"
 sources = [
-    "~/Projects/app-one",
-    "~/Projects/app-two",
+    "~/projects/app-one",
+    "~/projects/app-two",
 ]
-destination = "/Volumes/Backup/Projects/"
+destination = "/mnt/backup/projects/"
 delete = true
 
 # Rclone job: sync documents to multiple cloud remotes
@@ -52,7 +53,7 @@ delete = true
 [[job]]
 name = "documents-to-cloud"
 engine = "rclone"
-source = "~/Documents"
+source = "~/documents"
 remotes = ["my_gdrive", "my_s3"]
 mode = "sync"
 backup_path = "_archive"
@@ -62,7 +63,7 @@ backup_retention_days = 365
 [[job]]
 name = "media-to-cloud"
 engine = "rclone"
-source = "/Volumes/Backup/Media"
+source = "/mnt/backup/media"
 remotes = ["my_gdrive"]
 mode = "copy"
 bwlimit = "2M"
