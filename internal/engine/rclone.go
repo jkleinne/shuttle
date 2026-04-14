@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jkleinne/shuttle/internal/log"
@@ -28,10 +30,58 @@ func NewRcloneExecutor(logger *log.Logger, logFile string) *RcloneExecutor {
 	return &RcloneExecutor{logger: logger, logFile: logFile}
 }
 
+// rcloneProgressTracker accumulates rclone -P stderr output and surfaces the
+// most informative progress line. The Transferred bytes-with-speed line
+// takes precedence over the Checks line because it carries transfer rate
+// information, which is more actionable to the user.
+type rcloneProgressTracker struct {
+	lastBytesLine  string
+	lastChecksLine string
+}
+
+// feedLine processes one line of rclone -P output and returns the current best
+// progress text. Returns empty string when no informative line has been seen.
+func (t *rcloneProgressTracker) feedLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "Transferred:") && strings.Contains(trimmed, "/s"):
+		colonIdx := strings.IndexByte(trimmed, ':')
+		t.lastBytesLine = strings.TrimSpace(trimmed[colonIdx+1:])
+	case strings.HasPrefix(trimmed, "Checks:"):
+		colonIdx := strings.IndexByte(trimmed, ':')
+		t.lastChecksLine = strings.TrimSpace(trimmed[colonIdx+1:])
+	}
+
+	if t.lastBytesLine != "" {
+		return t.lastBytesLine
+	}
+	return t.lastChecksLine
+}
+
+// scanRcloneProgress reads rclone stderr (-P output) line by line, extracts
+// progress updates, and forwards each to onProgress. If onProgress is nil,
+// the reader is drained without parsing.
+func scanRcloneProgress(r io.Reader, onProgress func(string)) {
+	if onProgress == nil {
+		io.Copy(io.Discard, r) //nolint:errcheck // discard intentionally; caller doesn't need the error
+		return
+	}
+
+	var tracker rcloneProgressTracker
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		if progress := tracker.feedLine(scanner.Text()); progress != "" {
+			onProgress(progress)
+		}
+	}
+}
+
 // Exec runs rclone with the given pre-assembled argument list.
-// The args slice must contain the subcommand, all flags, source, and destination.
-// Stats are parsed from the log file section written during this call.
-func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
+// Stderr is piped to a goroutine that parses -P progress output and forwards
+// updates to onProgress (nil disables callbacks). Stdout is discarded since
+// rclone writes structured output to the log file. Stats are parsed from the
+// log file section written during this call.
+func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
 	// Display name from second-to-last arg (source).
 	source := ""
 	if len(args) >= 2 {
@@ -47,10 +97,28 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
 	start := time.Now()
 
 	cmd := exec.CommandContext(ctx, "rclone", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.Discard
 
-	err := cmd.Run()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.logger.FileError(fmt.Sprintf("rclone pipe setup failed for %s: %v", displayName, err))
+		return ItemResult{Name: displayName, Status: StatusFailed}
+	}
+
+	if err := cmd.Start(); err != nil {
+		e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
+		return ItemResult{Name: displayName, Status: StatusFailed}
+	}
+
+	var pipeWg sync.WaitGroup
+	pipeWg.Add(1)
+	go func() {
+		defer pipeWg.Done()
+		scanRcloneProgress(stderr, onProgress)
+	}()
+
+	pipeWg.Wait()
+	runErr := cmd.Wait()
 	elapsed := time.Since(start)
 
 	var stats TransferStats
@@ -61,13 +129,13 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
 	stats.Elapsed = elapsed
 
 	status := StatusOK
-	if err != nil {
+	if runErr != nil {
 		status = StatusFailed
 		subcommand := "rclone"
 		if len(args) > 0 {
 			subcommand = "rclone " + args[0]
 		}
-		e.logger.Error(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, err))
+		e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
 	}
 
 	return ItemResult{Name: displayName, Status: status, Stats: stats}

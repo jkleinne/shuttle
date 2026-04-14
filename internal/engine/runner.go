@@ -149,7 +149,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		r.logger.Info(fmt.Sprintf("Destination: %s", job.Destination))
 
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
-		result := r.rsync.Exec(ctx, args)
+		result := r.rsync.Exec(ctx, args, nil)
 		items = append(items, result)
 	}
 	return JobResult{Name: job.Name, Items: items}
@@ -207,7 +207,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 
-	result := r.rclone.Exec(ctx, args)
+	result := r.rclone.Exec(ctx, args, nil)
 	result.Name = destName
 	if destName == "" {
 		result.Name = "(prefix root)"
