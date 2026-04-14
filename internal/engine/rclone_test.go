@@ -93,6 +93,32 @@ func TestScanRcloneProgress_ConcatenatedPerFileProgress(t *testing.T) {
 	}
 }
 
+func TestScanRcloneProgress_CheckThenTransfer(t *testing.T) {
+	// Simulates a real rclone run: check-only phase (0 B / 0 B) produces no
+	// progress, then an active transfer starts and progress appears.
+	input := "Transferred:   0 B / 0 B, -, 0 B/s, ETA -\n" +
+		"Checks:        500 / 1000, 50%\n" +
+		"Transferred:   0 / 0\n" +
+		"Elapsed time:  1.0s\n" +
+		"Transferred:   512 KiB / 2 MiB, 25%, 512 KiB/s, ETA 3s\n" +
+		"Checks:       1000 / 1000, 100%\n" +
+		"Transferred:   1 / 5, 20%\n" +
+		"Elapsed time:  2.0s\n"
+	r := strings.NewReader(input)
+
+	var called []string
+	scanRcloneProgress(r, func(text string) {
+		called = append(called, text)
+	})
+
+	if len(called) == 0 {
+		t.Fatal("onProgress was never called after transfer started")
+	}
+	if !strings.Contains(called[0], "512 KiB / 2 MiB") {
+		t.Errorf("first progress = %q, want bytes line from transfer phase", called[0])
+	}
+}
+
 func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 	// Rclone uses \r for in-place updates during transfers
 	input := "Transferred:   1 GiB / 3 GiB, 33%, 5 MiB/s, ETA 10m\rTransferred:   2 GiB / 3 GiB, 66%, 5 MiB/s, ETA 5m\r"
