@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jkleinne/shuttle/internal/log"
@@ -28,10 +30,78 @@ func NewRcloneExecutor(logger *log.Logger, logFile string) *RcloneExecutor {
 	return &RcloneExecutor{logger: logger, logFile: logFile}
 }
 
+// rcloneProgressTracker extracts transfer progress from rclone -P stdout.
+// Only surfaces the Transferred bytes line (with speed and ETA) when files
+// are actively moving. During check-only phases (no transfer, or "0 B / 0 B"),
+// returns empty so the spinner falls back to showing elapsed time.
+type rcloneProgressTracker struct {
+	lastBytesLine string
+}
+
+// feedLine processes one line of rclone -P output. Returns non-empty only
+// when rclone is actively transferring bytes (not just checking files).
+//
+// When piped, rclone's per-file progress lines are not newline-terminated,
+// so the "Transferred:" bytes line can appear mid-segment after a per-file
+// line (e.g. "* file.bin: 40% /1Mi, 100Ki/s, 5sTransferred: 512 KiB / ...").
+// LastIndex finds the stats marker regardless of where it sits in the segment.
+func (t *rcloneProgressTracker) feedLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	idx := strings.LastIndex(trimmed, "Transferred:")
+	if idx < 0 {
+		return t.lastBytesLine
+	}
+	rest := trimmed[idx:]
+	if !strings.Contains(rest, "/s") {
+		return t.lastBytesLine
+	}
+	colonIdx := strings.IndexByte(rest, ':')
+	value := strings.TrimSpace(rest[colonIdx+1:])
+	if !strings.HasPrefix(value, "0 B / 0 B") {
+		t.lastBytesLine = value
+	}
+	return t.lastBytesLine
+}
+
+// scanRcloneProgress reads rclone -P progress output, extracts progress
+// updates, and forwards each to onProgress. If onProgress is nil, the reader
+// is drained without parsing. Handles both \n and \r as line delimiters
+// because rclone uses \r for in-place updates during transfers.
+func scanRcloneProgress(r io.Reader, onProgress func(string)) {
+	if onProgress == nil {
+		io.Copy(io.Discard, r) //nolint:errcheck
+		return
+	}
+
+	var tracker rcloneProgressTracker
+	buf := make([]byte, 4096)
+	var segment []byte
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			for _, b := range buf[:n] {
+				if b == '\r' || b == '\n' {
+					if len(segment) > 0 {
+						if progress := tracker.feedLine(string(segment)); progress != "" {
+							onProgress(progress)
+						}
+						segment = segment[:0]
+					}
+				} else {
+					segment = append(segment, b)
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // Exec runs rclone with the given pre-assembled argument list.
-// The args slice must contain the subcommand, all flags, source, and destination.
-// Stats are parsed from the log file section written during this call.
-func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
+// Stdout is piped to a goroutine that parses -P progress output. Stats are
+// parsed from the log file section written during this call.
+func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
 	// Display name from second-to-last arg (source).
 	source := ""
 	if len(args) >= 2 {
@@ -47,11 +117,38 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
 	start := time.Now()
 
 	cmd := exec.CommandContext(ctx, "rclone", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
-	err := cmd.Run()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		e.logger.FileError(fmt.Sprintf("rclone pipe setup failed for %s: %v", displayName, err))
+		return ItemResult{Name: displayName, Status: StatusFailed}
+	}
+
+	if err := cmd.Start(); err != nil {
+		e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
+		return ItemResult{Name: displayName, Status: StatusFailed}
+	}
+
+	var pipeWg sync.WaitGroup
+	pipeWg.Add(1)
+	go func() {
+		defer pipeWg.Done()
+		scanRcloneProgress(stdout, onProgress)
+	}()
+
+	pipeWg.Wait()
+	runErr := cmd.Wait()
 	elapsed := time.Since(start)
+
+	if stderrBuf.Len() > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(stderrBuf.String()), "\n") {
+			if line != "" {
+				e.logger.FileError(line)
+			}
+		}
+	}
 
 	var stats TransferStats
 	if e.logFile != "" {
@@ -61,13 +158,13 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string) ItemResult {
 	stats.Elapsed = elapsed
 
 	status := StatusOK
-	if err != nil {
+	if runErr != nil {
 		status = StatusFailed
 		subcommand := "rclone"
 		if len(args) > 0 {
 			subcommand = "rclone " + args[0]
 		}
-		e.logger.Error(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, err))
+		e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
 	}
 
 	return ItemResult{Name: displayName, Status: status, Stats: stats}

@@ -144,7 +144,8 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 
 	promptForPassword(logger)
 
-	runner := engine.NewRunner(cfg, configPath, logger, opts.DryRun, logPath)
+	pw := engine.NewProgressWriter(os.Stdout, useColor, useColor)
+	runner := engine.NewRunner(cfg, configPath, logger, pw, opts.DryRun, logPath)
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
 		return err
