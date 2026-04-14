@@ -43,6 +43,16 @@ func NewProgressWriter(w io.Writer, interactive bool, useColor bool) *ProgressWr
 	}
 }
 
+// ProgressCallback returns the UpdateProgress method as a callback suitable
+// for passing to executors. Returns nil in non-interactive mode so executors
+// skip progress parsing.
+func (pw *ProgressWriter) ProgressCallback() func(string) {
+	if !pw.interactive {
+		return nil
+	}
+	return pw.UpdateProgress
+}
+
 // Interactive returns whether the writer uses cursor manipulation.
 func (pw *ProgressWriter) Interactive() bool {
 	return pw.interactive
@@ -58,13 +68,13 @@ func (pw *ProgressWriter) StartJob(ctx context.Context, label string) {
 	pw.currentProgress = ""
 	pw.spinnerIdx = 0
 	pw.startTime = time.Now()
-	pw.done = make(chan struct{})
 	pw.mu.Unlock()
 
 	if !pw.interactive {
 		return
 	}
 
+	pw.done = make(chan struct{})
 	pw.wg.Add(1)
 	go pw.spin(ctx)
 }
@@ -94,7 +104,7 @@ func (pw *ProgressWriter) FinishJob(result ItemResult) {
 	if pw.interactive {
 		close(pw.done)
 		pw.wg.Wait()
-		fmt.Fprint(pw.w, "\033[2K\r")
+		fmt.Fprint(pw.w, ansiClearLine)
 	}
 
 	pw.mu.Lock()
