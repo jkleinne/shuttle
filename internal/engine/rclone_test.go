@@ -73,6 +73,26 @@ func TestScanRcloneProgress_NilCallback(t *testing.T) {
 	scanRcloneProgress(r, nil)
 }
 
+func TestScanRcloneProgress_ConcatenatedPerFileProgress(t *testing.T) {
+	// When piped, rclone's per-file progress line has no trailing delimiter.
+	// The next "Transferred:" bytes line gets concatenated onto it, forming a
+	// segment like: "* file.bin: 40% /1Mi, 100Ki/s, 5sTransferred: 512 KiB ..."
+	input := " *                                      test.bin: 40% /1Mi, 219.991Ki/s, 2sTransferred:   \t      604 KiB / 1 MiB, 59%, 206 KiB/s, ETA 2s\n"
+	r := strings.NewReader(input)
+
+	var called []string
+	scanRcloneProgress(r, func(text string) {
+		called = append(called, text)
+	})
+
+	if len(called) == 0 {
+		t.Fatal("onProgress was never called for concatenated per-file + Transferred line")
+	}
+	if !strings.Contains(called[0], "604 KiB / 1 MiB") {
+		t.Errorf("progress = %q, want '604 KiB / 1 MiB' bytes line", called[0])
+	}
+}
+
 func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 	// Rclone uses \r for in-place updates during transfers
 	input := "Transferred:   1 GiB / 3 GiB, 33%, 5 MiB/s, ETA 10m\rTransferred:   2 GiB / 3 GiB, 66%, 5 MiB/s, ETA 5m\r"

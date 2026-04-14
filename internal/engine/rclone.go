@@ -40,14 +40,25 @@ type rcloneProgressTracker struct {
 
 // feedLine processes one line of rclone -P output. Returns non-empty only
 // when rclone is actively transferring bytes (not just checking files).
+//
+// When piped, rclone's per-file progress lines are not newline-terminated,
+// so the "Transferred:" bytes line can appear mid-segment after a per-file
+// line (e.g. "* file.bin: 40% /1Mi, 100Ki/s, 5sTransferred: 512 KiB / ...").
+// LastIndex finds the stats marker regardless of where it sits in the segment.
 func (t *rcloneProgressTracker) feedLine(line string) string {
 	trimmed := strings.TrimSpace(line)
-	if strings.HasPrefix(trimmed, "Transferred:") && strings.Contains(trimmed, "/s") {
-		colonIdx := strings.IndexByte(trimmed, ':')
-		value := strings.TrimSpace(trimmed[colonIdx+1:])
-		if !strings.HasPrefix(value, "0 B / 0 B") {
-			t.lastBytesLine = value
-		}
+	idx := strings.LastIndex(trimmed, "Transferred:")
+	if idx < 0 {
+		return t.lastBytesLine
+	}
+	rest := trimmed[idx:]
+	if !strings.Contains(rest, "/s") {
+		return t.lastBytesLine
+	}
+	colonIdx := strings.IndexByte(rest, ':')
+	value := strings.TrimSpace(rest[colonIdx+1:])
+	if !strings.HasPrefix(value, "0 B / 0 B") {
+		t.lastBytesLine = value
 	}
 	return t.lastBytesLine
 }
@@ -88,9 +99,8 @@ func scanRcloneProgress(r io.Reader, onProgress func(string)) {
 }
 
 // Exec runs rclone with the given pre-assembled argument list.
-// Stdout is piped to a goroutine that parses -P progress output (rclone writes
-// progress to stdout, not stderr). Stats are parsed from the log file section
-// written during this call.
+// Stdout is piped to a goroutine that parses -P progress output. Stats are
+// parsed from the log file section written during this call.
 func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
 	// Display name from second-to-last arg (source).
 	source := ""
