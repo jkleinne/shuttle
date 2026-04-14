@@ -22,6 +22,20 @@ Backup and sync CLI that orchestrates [rsync](https://rsync.samba.org/) and [rcl
 
 ## Installation
 
+### Homebrew (macOS, Linux)
+
+```bash
+brew install jkleinne/tap/shuttle
+```
+
+This installs the latest release binary and pulls in `rsync` and `rclone` if they are not already on your system.
+
+### Prebuilt binaries
+
+Download the archive for your platform from the [Releases page](https://github.com/jkleinne/shuttle/releases) and extract the `shuttle` binary onto your `PATH`.
+
+### From source
+
 ```bash
 go install github.com/jkleinne/shuttle/cmd/shuttle@latest
 ```
