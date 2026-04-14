@@ -66,36 +66,45 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 // scanRcloneProgress reads rclone -P progress output, extracts progress
 // updates, and forwards each to onProgress. If onProgress is nil, the reader
 // is drained without parsing. Handles both \n and \r as line delimiters
-// because rclone uses \r for in-place updates during transfers.
-func scanRcloneProgress(r io.Reader, onProgress func(string)) {
+// because rclone uses \r for in-place updates during transfers. Returns the
+// first non-EOF read error encountered, or nil on clean EOF.
+func scanRcloneProgress(r io.Reader, onProgress func(string)) error {
 	if onProgress == nil {
-		_, _ = io.Copy(io.Discard, r)
-		return
+		_, err := io.Copy(io.Discard, r)
+		return err
 	}
 
 	var tracker rcloneProgressTracker
-	buf := make([]byte, 4096)
-	var segment []byte
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			for _, b := range buf[:n] {
-				if b == '\r' || b == '\n' {
-					if len(segment) > 0 {
-						if progress := tracker.feedLine(string(segment)); progress != "" {
-							onProgress(progress)
-						}
-						segment = segment[:0]
-					}
-				} else {
-					segment = append(segment, b)
-				}
-			}
+	scanner := bufio.NewScanner(r)
+	scanner.Split(splitOnCROrLF)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
 		}
-		if err != nil {
-			return
+		if progress := tracker.feedLine(string(line)); progress != "" {
+			onProgress(progress)
 		}
 	}
+	return scanner.Err()
+}
+
+// splitOnCROrLF is a bufio.SplitFunc that returns tokens delimited by either
+// \r or \n. Used for rclone -P output, which mixes \n-terminated log lines
+// with \r-terminated in-place progress updates.
+func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i, b := range data {
+		if b == '\r' || b == '\n' {
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 // Exec runs rclone with the given pre-assembled argument list.
@@ -135,7 +144,9 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	pipeWg.Add(1)
 	go func() {
 		defer pipeWg.Done()
-		scanRcloneProgress(stdout, onProgress)
+		if scanErr := scanRcloneProgress(stdout, onProgress); scanErr != nil {
+			e.logger.FileError(fmt.Sprintf("reading rclone progress for %s: %v", displayName, scanErr))
+		}
 	}()
 
 	pipeWg.Wait()
