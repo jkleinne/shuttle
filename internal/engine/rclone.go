@@ -30,54 +30,59 @@ func NewRcloneExecutor(logger *log.Logger, logFile string) *RcloneExecutor {
 	return &RcloneExecutor{logger: logger, logFile: logFile}
 }
 
-// rcloneProgressTracker accumulates rclone -P stdout output and surfaces the
-// most informative progress line. When files are actively transferring, the
-// bytes line (with speed and ETA) takes precedence. When rclone is only
-// checking files (Transferred shows "0 B / 0 B"), the Checks line is shown.
+// rcloneProgressTracker extracts transfer progress from rclone -P stdout.
+// Only surfaces the Transferred bytes line (with speed and ETA) when files
+// are actively moving. During check-only phases (no transfer, or "0 B / 0 B"),
+// returns empty so the spinner falls back to showing elapsed time.
 type rcloneProgressTracker struct {
-	lastBytesLine  string
-	lastChecksLine string
+	lastBytesLine string
 }
 
-// feedLine processes one line of rclone -P output and returns the current best
-// progress text. Returns empty string when no informative line has been seen.
+// feedLine processes one line of rclone -P output. Returns non-empty only
+// when rclone is actively transferring bytes (not just checking files).
 func (t *rcloneProgressTracker) feedLine(line string) string {
 	trimmed := strings.TrimSpace(line)
-	switch {
-	case strings.HasPrefix(trimmed, "Transferred:") && strings.Contains(trimmed, "/s"):
+	if strings.HasPrefix(trimmed, "Transferred:") && strings.Contains(trimmed, "/s") {
 		colonIdx := strings.IndexByte(trimmed, ':')
 		value := strings.TrimSpace(trimmed[colonIdx+1:])
-		// Only treat as active transfer when bytes are non-zero.
-		// Rclone always emits "0 B / 0 B, -, 0 B/s, ETA -" even during
-		// check-only runs; showing that is noise.
 		if !strings.HasPrefix(value, "0 B / 0 B") {
 			t.lastBytesLine = value
 		}
-	case strings.HasPrefix(trimmed, "Checks:"):
-		colonIdx := strings.IndexByte(trimmed, ':')
-		t.lastChecksLine = strings.TrimSpace(trimmed[colonIdx+1:])
 	}
-
-	if t.lastBytesLine != "" {
-		return t.lastBytesLine
-	}
-	return t.lastChecksLine
+	return t.lastBytesLine
 }
 
-// scanRcloneProgress reads rclone -P progress output line by line, extracts
-// progress updates, and forwards each to onProgress. If onProgress is nil,
-// the reader is drained without parsing.
+// scanRcloneProgress reads rclone -P progress output, extracts progress
+// updates, and forwards each to onProgress. If onProgress is nil, the reader
+// is drained without parsing. Handles both \n and \r as line delimiters
+// because rclone uses \r for in-place updates during transfers.
 func scanRcloneProgress(r io.Reader, onProgress func(string)) {
 	if onProgress == nil {
-		io.Copy(io.Discard, r) //nolint:errcheck // discard intentionally; caller doesn't need the error
+		io.Copy(io.Discard, r) //nolint:errcheck
 		return
 	}
 
 	var tracker rcloneProgressTracker
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		if progress := tracker.feedLine(scanner.Text()); progress != "" {
-			onProgress(progress)
+	buf := make([]byte, 4096)
+	var segment []byte
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			for _, b := range buf[:n] {
+				if b == '\r' || b == '\n' {
+					if len(segment) > 0 {
+						if progress := tracker.feedLine(string(segment)); progress != "" {
+							onProgress(progress)
+						}
+						segment = segment[:0]
+					}
+				} else {
+					segment = append(segment, b)
+				}
+			}
+		}
+		if err != nil {
+			return
 		}
 	}
 }
