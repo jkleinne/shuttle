@@ -5,6 +5,93 @@ import (
 	"testing"
 )
 
+func TestSelectMode(t *testing.T) {
+	logger := newTestLogger(t)
+
+	tests := []struct {
+		name             string
+		mode             string
+		destination      string
+		remoteName       string
+		backupPath       string
+		runTimestamp     string
+		isDir            bool
+		wantSubcommand   string
+		wantBackupDirArg string
+	}{
+		{
+			name:             "copy mode, directory source",
+			mode:             "copy",
+			destination:      "myremote:photos/",
+			remoteName:       "myremote",
+			backupPath:       "",
+			runTimestamp:     "2025-01-15_120000",
+			isDir:            true,
+			wantSubcommand:   "copy",
+			wantBackupDirArg: "",
+		},
+		{
+			name:             "copy mode, file source",
+			mode:             "copy",
+			destination:      "myremote:photos/",
+			remoteName:       "myremote",
+			backupPath:       "",
+			runTimestamp:     "2025-01-15_120000",
+			isDir:            false,
+			wantSubcommand:   "copy",
+			wantBackupDirArg: "",
+		},
+		{
+			name:             "sync mode, file source falls back to copy",
+			mode:             "sync",
+			destination:      "myremote:photos/",
+			remoteName:       "myremote",
+			backupPath:       "",
+			runTimestamp:     "2025-01-15_120000",
+			isDir:            false,
+			wantSubcommand:   "copy",
+			wantBackupDirArg: "",
+		},
+		{
+			name:             "sync mode, directory source",
+			mode:             "sync",
+			destination:      "myremote:photos/",
+			remoteName:       "myremote",
+			backupPath:       "",
+			runTimestamp:     "2025-01-15_120000",
+			isDir:            true,
+			wantSubcommand:   "sync",
+			wantBackupDirArg: "",
+		},
+		{
+			name:             "sync mode, directory source, backup path",
+			mode:             "sync",
+			destination:      "myremote:photos/",
+			remoteName:       "myremote",
+			backupPath:       "backups",
+			runTimestamp:     "2025-01-15_120000",
+			isDir:            true,
+			wantSubcommand:   "sync",
+			wantBackupDirArg: "myremote:backups/2025-01-15_120000/photos/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subcommand, backupDirArg := selectMode(
+				tt.mode, tt.destination, tt.remoteName,
+				tt.backupPath, tt.runTimestamp, tt.isDir, logger,
+			)
+			if subcommand != tt.wantSubcommand {
+				t.Errorf("subcommand = %q, want %q", subcommand, tt.wantSubcommand)
+			}
+			if backupDirArg != tt.wantBackupDirArg {
+				t.Errorf("backupDirArg = %q, want %q", backupDirArg, tt.wantBackupDirArg)
+			}
+		})
+	}
+}
+
 func TestScanRcloneProgress_ActiveTransfer_ShowsBytesLine(t *testing.T) {
 	input := "Transferred:   1.082 GiB / 2.164 GiB, 50%, 32.709 KiB/s, ETA 30s\n"
 	r := strings.NewReader(input)
