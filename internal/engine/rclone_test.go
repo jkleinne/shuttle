@@ -233,6 +233,11 @@ func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Rclone executor integration tests
+//
+// Exec tests use --config /dev/null via ExtraFlags to prevent rclone from
+// reading the user's config. CleanupArchives tests use the RCLONE_CONFIG env
+// var instead because CleanupArchives constructs its own rclone commands
+// internally and does not accept extra flags.
 // ---------------------------------------------------------------------------
 
 func skipIfNoRclone(t *testing.T) {
