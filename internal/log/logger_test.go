@@ -150,3 +150,36 @@ func TestLogPath_ReturnsFilePath(t *testing.T) {
 		t.Errorf("LogPath() = %q, want %q", logger.LogPath(), logFile)
 	}
 }
+
+func TestLogger_FileOnly_SkipsTerminal(t *testing.T) {
+	var termBuf bytes.Buffer
+	logDir := t.TempDir()
+	logFile := filepath.Join(logDir, "test.log")
+
+	logger, err := log.NewWithWriter(&termBuf, logFile, false)
+	if err != nil {
+		t.Fatalf("NewWithWriter: %v", err)
+	}
+	defer logger.Close()
+
+	logger.FileHeader("section")
+	logger.FileInfo("info msg")
+	logger.FileError("err msg")
+
+	termOut := termBuf.String()
+	if termOut != "" {
+		t.Errorf("terminal should be empty for file-only methods, got: %q", termOut)
+	}
+
+	fileBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	fileOut := string(fileBytes)
+
+	for _, want := range []string{"==> section", "[INFO] info msg", "[ERROR] err msg"} {
+		if !strings.Contains(fileOut, want) {
+			t.Errorf("log file missing %q", want)
+		}
+	}
+}

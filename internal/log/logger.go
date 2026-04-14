@@ -105,6 +105,23 @@ func (l *Logger) Error(msg string) {
 	l.filef("[ERROR] %s", msg)
 }
 
+// FileHeader writes a section header to the log file only.
+// Used by the runner in interactive mode where terminal output
+// is managed by the ProgressWriter.
+func (l *Logger) FileHeader(msg string) {
+	l.filef("==> %s", msg)
+}
+
+// FileInfo writes an informational message to the log file only.
+func (l *Logger) FileInfo(msg string) {
+	l.filef("[INFO] %s", msg)
+}
+
+// FileError writes an error message to the log file only.
+func (l *Logger) FileError(msg string) {
+	l.filef("[ERROR] %s", msg)
+}
+
 // termf formats and writes msg to the terminal stream. When useColor is false,
 // ANSI escape sequences are stripped before writing.
 func (l *Logger) termf(format string, args ...any) {
