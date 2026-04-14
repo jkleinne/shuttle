@@ -1,8 +1,15 @@
 package engine
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jkleinne/shuttle/internal/config"
 )
 
 func TestSelectMode(t *testing.T) {
@@ -221,5 +228,237 @@ func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 	}
 	if !strings.Contains(called[len(called)-1], "2 GiB / 3 GiB") {
 		t.Errorf("last progress = %q, want latest transfer line", called[len(called)-1])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rclone executor integration tests
+// ---------------------------------------------------------------------------
+
+func skipIfNoRclone(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("rclone"); err != nil {
+		t.Skip("rclone not found on PATH")
+	}
+}
+
+func newRcloneTestExecutor(t *testing.T) (*RcloneExecutor, string) {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "rclone-test.log")
+	logger := newTestLogger(t)
+	return NewRcloneExecutor(logger, logPath), logPath
+}
+
+func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
+	skipIfNoRclone(t)
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	result := executor.Exec(context.Background(), args, nil)
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok", result.Status)
+	}
+	content, err := os.ReadFile(filepath.Join(dst, "hello.txt"))
+	if err != nil {
+		t.Fatalf("reading copied file: %v", err)
+	}
+	if string(content) != "world" {
+		t.Errorf("file content = %q, want 'world'", string(content))
+	}
+}
+
+func TestRcloneExec_CopyDir_Succeeds(t *testing.T) {
+	skipIfNoRclone(t)
+	src := t.TempDir()
+	subDir := filepath.Join(src, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("creating subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "nested.txt"), []byte("deep"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "top.txt"), []byte("shallow"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	dst := t.TempDir()
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	result := executor.Exec(context.Background(), args, nil)
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok", result.Status)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "top.txt")); err != nil {
+		t.Error("top.txt should exist at dest")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "sub", "nested.txt")); err != nil {
+		t.Error("sub/nested.txt should exist at dest")
+	}
+}
+
+func TestRcloneExec_SyncDir_DeletesExtra(t *testing.T) {
+	skipIfNoRclone(t)
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "stale.txt"), []byte("remove"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs("sync", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	result := executor.Exec(context.Background(), args, nil)
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok", result.Status)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "stale.txt")); !os.IsNotExist(err) {
+		t.Error("stale.txt should have been deleted by sync")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "keep.txt")); err != nil {
+		t.Error("keep.txt should still exist")
+	}
+}
+
+func TestRcloneExec_SyncDir_BackupDir_PreservesDeleted(t *testing.T) {
+	skipIfNoRclone(t)
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dst, "victim.txt"), []byte("save me"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	backupDir := t.TempDir()
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	backupDirArg := ":local:" + backupDir
+	args := BuildRcloneArgs("sync", nil, job, src+"/", ":local:"+dst, false, logPath, backupDirArg)
+	result := executor.Exec(context.Background(), args, nil)
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok", result.Status)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "victim.txt")); !os.IsNotExist(err) {
+		t.Error("victim.txt should be removed from dest")
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, "victim.txt")); err != nil {
+		t.Error("victim.txt should be preserved in backup dir")
+	}
+}
+
+func TestRcloneExec_MissingSource_Fails(t *testing.T) {
+	skipIfNoRclone(t)
+	dst := t.TempDir()
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs("copy", nil, job, "/nonexistent/path/does/not/exist", ":local:"+dst, false, logPath, "")
+	result := executor.Exec(context.Background(), args, nil)
+	if result.Status != StatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CleanupArchives guard-clause tests (no rclone needed)
+// ---------------------------------------------------------------------------
+
+func TestCleanupArchives_DryRun_Skips(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 30, true)
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestCleanupArchives_EmptyBackupPath_Skips(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(context.Background(), "remote", "", 30, false)
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestCleanupArchives_ZeroRetention_Skips(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 0, false)
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CleanupArchives integration tests (require rclone + temp config)
+// ---------------------------------------------------------------------------
+
+// writeRcloneConfig creates a temp rclone config with a "testlocal" remote
+// of type "local" and sets RCLONE_CONFIG. Returns a cleanup function.
+// Not safe for t.Parallel() because it manipulates process-global env.
+func writeRcloneConfig(t *testing.T) (cleanup func()) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := os.WriteFile(configPath, []byte("[testlocal]\ntype = local\n"), 0o644); err != nil {
+		t.Fatalf("writing rclone config: %v", err)
+	}
+	prev, hadPrev := os.LookupEnv("RCLONE_CONFIG")
+	os.Setenv("RCLONE_CONFIG", configPath) //nolint:errcheck
+	return func() {
+		if hadPrev {
+			os.Setenv("RCLONE_CONFIG", prev) //nolint:errcheck
+		} else {
+			os.Unsetenv("RCLONE_CONFIG") //nolint:errcheck
+		}
+	}
+}
+
+func TestCleanupArchives_PurgesExpired(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	archiveRoot := t.TempDir()
+	oldDate := time.Now().AddDate(0, 0, -10).Format("2006-01-02")
+	oldDir := filepath.Join(archiveRoot, oldDate+"_backup")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatalf("creating old archive dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "data.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("writing archive file: %v", err)
+	}
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	if err != nil {
+		t.Fatalf("CleanupArchives returned error: %v", err)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Error("expired archive dir should have been purged")
+	}
+}
+
+func TestCleanupArchives_KeepsRecent(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	archiveRoot := t.TempDir()
+	todayDate := time.Now().Format("2006-01-02")
+	recentDir := filepath.Join(archiveRoot, todayDate+"_backup")
+	if err := os.MkdirAll(recentDir, 0o755); err != nil {
+		t.Fatalf("creating recent archive dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recentDir, "data.txt"), []byte("recent"), 0o644); err != nil {
+		t.Fatalf("writing archive file: %v", err)
+	}
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	if err != nil {
+		t.Fatalf("CleanupArchives returned error: %v", err)
+	}
+	if _, err := os.Stat(recentDir); err != nil {
+		t.Error("recent archive dir should still exist")
 	}
 }
