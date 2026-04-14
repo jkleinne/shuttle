@@ -32,6 +32,7 @@ No Makefile or task runner. Linting via `golangci-lint` (config at `.golangci.ym
 cmd/
   shuttle/
     main.go              # CLI entry point. ALL os.Exit calls live here.
+    main_test.go         # CLI exit code integration tests (builds binary, asserts exit codes)
 
 internal/
   config/
@@ -49,7 +50,7 @@ internal/
     progress.go          # ProgressWriter: spinner and status lines during job execution
     runner_test.go       # Runner unit tests
     rsync_test.go        # Rsync integration tests
-    rclone_test.go       # Rclone progress parsing tests
+    rclone_test.go       # Rclone mode selection, executor integration, archive cleanup, progress parsing tests
     flags_test.go        # Flag assembly and conflict-detection tests
     path_test.go         # Path resolution tests
     stats_test.go        # Stats parsing and rendering tests
@@ -85,7 +86,7 @@ go.sum                   # Dependency hashes
 - **New packages** go under `internal/`. Nothing is exported outside the module.
 - **Test files** live next to the code they test (`foo_test.go` beside `foo.go`).
 - **Test fixtures** go in `testdata/` at the repo root. Access via `testdataPath(name)` or `readFixture(t, name)` helpers in tests.
-- **CLI commands** stay in `cmd/shuttle/main.go`. If the CLI grows, add subcommand files in the same directory (e.g., `cmd/shuttle/validate.go`).
+- **CLI commands** stay in `cmd/shuttle/main.go`. If the CLI grows, add subcommand files in the same directory (e.g., `cmd/shuttle/validate.go`). CLI integration tests live in `cmd/shuttle/main_test.go`.
 - **No `pkg/` directory.** Everything is internal.
 - **No `utils/` or `helpers/` packages.** If a utility is needed by two packages, evaluate whether a shared package is justified or if duplication is cheaper (see `expandTilde` precedent).
 

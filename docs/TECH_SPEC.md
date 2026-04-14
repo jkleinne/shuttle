@@ -378,8 +378,8 @@ All dependencies appear to be on recent versions as of the Go 1.26.2 toolchain. 
 | # | Issue | Severity | Affected Files | Effort | Recommended Fix |
 |---|-------|----------|----------------|--------|-----------------|
 | ~~1~~ | ~~**No CI pipeline**~~ | ~~High~~ | ~~(project-level)~~ | ~~Small~~ | **Resolved.** `.github/workflows/ci.yml` with parallel test and lint jobs. Test: `go build`, `go test -race`. Lint: `golangci-lint` (via `.golangci.yml`), `govulncheck`. Triggers on push to main and PRs. |
-| 2 | **Rclone executor integration tests still absent** | Medium | `engine/rclone.go` | Medium | `rclone_test.go` tests progress parsing only. Full execution tests against rclone's `local` backend are still missing. Verify flag construction, mode selection, backup-dir logic, archive cleanup. |
-| 3 | **No CLI integration tests** | Medium | `cmd/shuttle/main.go` | Medium | Build binary, invoke via `exec.Command`, assert exit codes and output. |
+| ~~2~~ | ~~**Rclone executor integration tests still absent**~~ | ~~Medium~~ | ~~`engine/rclone.go`~~ | ~~Medium~~ | **Resolved.** `rclone_test.go` now has 15 tests: 5 `selectMode` unit tests, 5 executor integration tests against `local` backend (copy file, copy dir, sync delete, sync backup-dir, missing source), and 5 `CleanupArchives` tests (3 guard clauses + 2 integration). |
+| ~~3~~ | ~~**No CLI integration tests**~~ | ~~Medium~~ | ~~`cmd/shuttle/main.go`~~ | ~~Medium~~ | **Resolved.** `cmd/shuttle/main_test.go` has 7 exit code integration tests that build the binary via `exec.Command` and assert codes 0/1/2 for valid config, missing config, invalid config, unknown job names, and partial failure scenarios. |
 | 4 | **macOS-specific rsync flag (`-E`) in example config** | Low | `config.example.toml` | Small | Document that `-E` is macOS-specific; users on Linux should omit it from `[defaults.rsync]`. |
 | 5 | **No structured (JSON) output** | Low | `engine/render.go` | Medium | Add `--output json` flag. Useful for scripting and monitoring. |
 
@@ -394,45 +394,51 @@ All dependencies appear to be on recent versions as of the Go 1.26.2 toolchain. 
 | `internal/config` | `config_test.go` | `testing` (stdlib) | High: parsing, validation, tilde expansion, XDG paths |
 | `internal/engine` | `runner_test.go` | `testing` | Medium: job name validation, job selection logic (table-driven subtests) |
 | `internal/engine` | `rsync_test.go` | `testing` | High: real rsync integration tests with temp dirs |
-| `internal/engine` | `rclone_test.go` | `testing` | Low: progress parsing (`scanRcloneProgress`) only; no execution tests |
+| `internal/engine` | `rclone_test.go` | `testing` | High: mode selection unit tests (5 cases), executor integration tests against `local` backend (5 cases), `CleanupArchives` guard clauses and integration tests (5 cases), progress parsing |
 | `internal/engine` | `flags_test.go` | `testing` | Medium: arg-list construction, tuning flags, conflict detection |
 | `internal/engine` | `path_test.go` | `testing` | High: stat helper, remote detection, dest-name derivation |
 | `internal/engine` | `stats_test.go` | `testing` | High: fixture-based parsing, formatting, rendering |
 | `internal/engine` | `progress_test.go` | `testing` | Medium: non-interactive status lines, SkipJob output, stats formatting |
 | `internal/log` | `logger_test.go` | `testing` | High: dual-stream, color, file format |
-| `cmd/shuttle` | (none) | — | None |
+| `cmd/shuttle` | `main_test.go` | `testing` | Medium: exit code integration tests (7 cases) building binary and asserting codes 0/1/2 via `exec.Command` |
 
 **Framework:** Go standard library `testing` package. No external test frameworks. This is idiomatic Go.
 
 **Test patterns:**
 - Fixture files in `testdata/` for stats parsers and config samples
 - Real rsync calls against temp directories (integration tests, not mocked)
+- Real rclone calls against `local` backend with temp directories (no remote config needed)
+- CLI integration tests that build the binary and invoke it via `exec.Command`
 - Table-driven tests for validation and path resolution
 
 ### What's Missing
 
-1. **CLI integration tests:** Exit codes, flag parsing, error output, signal handling.
-2. **Rclone executor tests:** Flag construction, mode selection, backup-dir calculation, archive cleanup with real rclone.
+1. ~~**CLI integration tests:** Exit codes, flag parsing, error output, signal handling.~~ **Resolved.** 7 tests in `cmd/shuttle/main_test.go`.
+2. ~~**Rclone executor tests:** Flag construction, mode selection, backup-dir calculation, archive cleanup with real rclone.~~ **Resolved.** 15 tests in `rclone_test.go` (5 mode selection, 5 executor, 5 cleanup).
 3. **Full pipeline test:** End-to-end Runner.Run() with controlled config, mocked or local executors.
 
 ### Recommended Minimal Testing Plan
 
-#### Before Launch (High Priority)
+#### ~~Before Launch (High Priority)~~ Done
 
 | Test | Why | Effort |
 |------|-----|--------|
-| **Rclone mode selection unit tests** | `selectMode()` has four branches (copy/sync x file/dir) that determine data safety. A bug here could cause data loss. | Small |
-| **CLI exit code integration tests** | Build binary, run against valid/invalid config, assert exit codes. Verifies the contract that scripts and cron rely on. | Medium |
-| **Archive cleanup date parsing tests** | `CleanupArchives` parses directory names for dates. A parsing bug could delete recent archives. | Small |
+| ~~**Rclone mode selection unit tests**~~ | ~~`selectMode()` has four branches (copy/sync x file/dir) that determine data safety. A bug here could cause data loss.~~ | ~~Small~~ |
+| ~~**CLI exit code integration tests**~~ | ~~Build binary, run against valid/invalid config, assert exit codes. Verifies the contract that scripts and cron rely on.~~ | ~~Medium~~ |
+| ~~**Archive cleanup date parsing tests**~~ | ~~`CleanupArchives` parses directory names for dates. A parsing bug could delete recent archives.~~ | ~~Small~~ |
+
+**Resolved.** All three items completed: 5 `selectMode` unit tests, 7 CLI exit code tests, 5 `CleanupArchives` tests (3 guard clauses + 2 integration).
 
 #### Post-Launch (Medium Priority)
 
 | Test | Why | Effort |
 |------|-----|--------|
-| **Rclone integration tests** | Test against `local` backend (no remote needed). Verify copy vs. sync behavior, backup-dir creation, archive cleanup lifecycle. | Medium |
+| ~~**Rclone integration tests**~~ | ~~Test against `local` backend (no remote needed). Verify copy vs. sync behavior, backup-dir creation, archive cleanup lifecycle.~~ | ~~Medium~~ |
 | **Signal handling test** | Spawn subprocess, send SIGINT, verify exit code 130 and clean output. | Medium |
 | **Password prompt test** | Verify `promptForPassword` behavior with mock stdin. | Small |
 | **Full pipeline integration test** | Runner.Run() with a minimal config, temp dirs for rsync, local backend for rclone. Assert summary correctness. | Large |
+
+Rclone integration tests resolved: 10 tests against `local` backend cover executor operations and archive cleanup.
 
 ---
 
@@ -447,7 +453,7 @@ All dependencies appear to be on recent versions as of the Go 1.26.2 toolchain. 
 | **CI pipeline** | Yes | GitHub Actions: parallel test + lint jobs, triggered on push to main and PRs |
 | **Linter config** | Yes | `.golangci.yml` with explicit default linter set (errcheck, govet, ineffassign, staticcheck, unused) |
 | **Config validation** | Yes | `shuttle validate` subcommand for config-only validation |
-| **Test suite** | Partial | 106 test functions, high coverage on core packages, gaps on CLI and rclone executor |
+| **Test suite** | Yes | High coverage across all packages including CLI exit codes, rclone executor, and archive cleanup |
 | **Config example** | Yes | `config.example.toml` with all sections documented, platform-neutral defaults |
 | **Dev guide** | Yes | `CLAUDE.md` covers commands, architecture, testing patterns, conventions |
 | **XDG compliance** | Yes | Config, logs, and state follow XDG base directory spec |
@@ -472,9 +478,9 @@ This list is ordered by priority. Items are concrete and actionable.
 - [x] **Write README.md** (Medium). Covers installation, quick start, configuration reference, CLI usage, exit codes, platform support.
 - [x] **Add GitHub Actions CI** (Small). `.github/workflows/ci.yml`: parallel test (`go build`, `go test -race`) and lint (`golangci-lint`, `govulncheck`) jobs.
 - [x] **Add `shuttle validate` subcommand** (Small). Parse config, run validation, print errors or `config ok: <path>`. Exit 0/2.
-- [ ] **Add rclone mode selection tests** (Small). Unit test `selectMode()` for all branch combinations.
-- [ ] **Add CLI exit code tests** (Medium). Build binary, invoke with test configs, assert codes.
+- [x] **Add rclone mode selection tests** (Small). 5 unit tests for `selectMode()` covering all branch combinations.
+- [x] **Add CLI exit code tests** (Medium). 7 tests in `cmd/shuttle/main_test.go` building binary and asserting codes 0/1/2.
 - [ ] **Add Goreleaser config** (Medium). `.goreleaser.yml` with macOS arm64/amd64, Linux amd64. GitHub Releases.
 - [ ] **Add Homebrew formula** (Small). After first Goreleaser release.
-- [ ] **Add rclone integration tests** (Medium). Test against `local` backend.
+- [x] **Add rclone integration tests** (Medium). 10 tests against `local` backend covering executor and archive cleanup.
 - [ ] **Add full pipeline integration test** (Large). End-to-end with temp dirs and local rclone.

@@ -105,7 +105,7 @@ Without a wrapper, this means maintaining fragile shell scripts that grow organi
 | ~~**Config validation command**~~ | ~~Medium~~ | **Resolved.** `shuttle validate` parses and validates config, reports errors or prints `config ok: <path>`. |
 | **Structured output (JSON)** | Low | Summary is human-readable text only. JSON output would enable scripting and monitoring integration. |
 | **Overall run progress indicator** | Low | No "Job 3 of 7" counter across the whole run. Each job shows live per-job progress via the ProgressWriter spinner. |
-| **Rclone executor tests** | Medium | Integration tests exist for rsync but not rclone. Would require test remotes or a local rclone backend. |
+| ~~**Rclone executor tests**~~ | ~~Medium~~ | **Resolved.** 10 integration tests cover `RcloneExecutor.Exec` (copy file, copy dir, sync delete, sync backup-dir, missing source) and `CleanupArchives` (guard clauses, purge expired, keep recent) against rclone's `local` backend. |
 | **`--color` / `--no-color` flag** | Low | Color is auto-detected. No manual override for edge cases (piped output with forced color, etc.). |
 
 ---
@@ -133,8 +133,8 @@ Without a wrapper, this means maintaining fragile shell scripts that grow organi
 | Gap | Severity | Description |
 |-----|----------|-------------|
 | ~~**No config validation subcommand**~~ | ~~Medium~~ | **Resolved.** `shuttle validate` subcommand added. |
-| **No CLI integration tests** | Medium | `main.go` is untested. Signal handling, flag parsing, and password prompt flow are manual-test-only. |
-| **No rclone executor integration tests** | Medium | Rsync executor has integration tests with real files. Rclone progress parsing (`scanRcloneProgress`) is now tested, but full execution against a real rclone backend is not. |
+| ~~**No CLI integration tests**~~ | ~~Medium~~ | **Resolved.** 7 exit code integration tests in `cmd/shuttle/main_test.go` build the binary and assert exit codes 0/1/2 for valid config, missing config, invalid config, unknown job names, and partial failure scenarios. |
+| ~~**No rclone executor integration tests**~~ | ~~Medium~~ | **Resolved.** 10 integration tests cover executor operations (copy, sync, backup-dir, missing source) and archive cleanup against rclone's `local` backend. |
 | **No man page** | Low | `shuttle --help` works but a man page would be expected for a Unix tool. |
 
 ---
@@ -156,8 +156,8 @@ Without a wrapper, this means maintaining fragile shell scripts that grow organi
 
 | Item | Effort | Description |
 |------|--------|-------------|
-| CLI integration tests | Medium | Test flag parsing, exit codes, and error paths using `exec.Command` to invoke the built binary. |
-| Rclone executor integration tests | Medium | Test against rclone's `local` backend (no remote needed). Verify flag construction, mode selection, archive cleanup. Progress parsing is already tested. |
+| ~~CLI integration tests~~ | ~~Medium~~ | **Done.** 7 tests in `cmd/shuttle/main_test.go` build the binary and assert exit codes 0/1/2. |
+| ~~Rclone executor integration tests~~ | ~~Medium~~ | **Done.** 10 tests against rclone's `local` backend covering executor operations and archive cleanup. |
 | `--color` / `--no-color` flag | Small | Override auto-detection for scripted and piped usage. |
 | Add `--verbose` / `--quiet` flags | Small | Control output verbosity. Quiet mode for cron (errors only). |
 | ~~GitHub Actions CI~~ | ~~Small~~ | **Done.** Two parallel jobs: test (`go test -race`, `go build`) and lint (`golangci-lint`, `govulncheck`). Triggers on push to main and PRs. |
