@@ -4,7 +4,40 @@ linters:
   default: none
   enable:
     - errcheck
+    - gocyclo
     - govet
     - ineffassign
+    - mnd
+    - nestif
     - staticcheck
     - unused
+  settings:
+    gocyclo:
+      min-complexity: 20
+    nestif:
+      min-complexity: 4
+    mnd:
+      ignored-functions:
+        - make
+        - strconv.*
+        - time.Date
+        - time.Duration
+        - os.MkdirAll
+        - os.OpenFile
+        - os.WriteFile
+        - bufio.NewScanner
+      ignored-numbers:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+        - "10"
+        - "100"
+        - "1000"
+  exclusions:
+    rules:
+      # Table-driven tests inflate cyclomatic complexity without indicating
+      # genuine complexity. Exclude test files from gocyclo only.
+      - path: _test\.go
+        linters:
+          - gocyclo
