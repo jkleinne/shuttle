@@ -105,14 +105,16 @@ func writeConfig(t *testing.T, toml string) []string {
 	}
 }
 
-func TestCLI_Version_PrintsVersion(t *testing.T) {
+func TestCLI_Version_PrintsVersionCommitAndDate(t *testing.T) {
 	env := []string{"PATH=" + os.Getenv("PATH")}
 	result := runShuttle(t, env, "version")
 	if result.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0", result.exitCode)
 	}
-	if !strings.Contains(result.stdout, "shuttle") {
-		t.Errorf("stdout = %q, want it to contain 'shuttle'", result.stdout)
+	for _, want := range []string{"shuttle", "commit:", "built:"} {
+		if !strings.Contains(result.stdout, want) {
+			t.Errorf("stdout = %q, want it to contain %q", result.stdout, want)
+		}
 	}
 }
 
