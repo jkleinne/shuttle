@@ -30,12 +30,12 @@ func TestMain(m *testing.M) {
 	buildCmd.Dir = filepath.Join("..", "..")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building shuttle: %v\n%s\n", err, out)
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		os.Exit(2)
 	}
 
 	code := m.Run()
-	os.RemoveAll(dir)
+	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
 
