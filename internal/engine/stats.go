@@ -74,12 +74,15 @@ type Summary struct {
 	DryRun   bool
 }
 
-// HasErrors returns true when at least one item across all jobs has StatusFailed.
+// HasErrors returns true when at least one item across all jobs has StatusFailed
+// or StatusNotFound. Both statuses represent failure conditions: StatusFailed
+// means the tool ran but the sync failed; StatusNotFound means the source path
+// could not be resolved before the tool was invoked.
 // Used by the CLI to choose a non-zero exit code after partial failures.
 func (s Summary) HasErrors() bool {
 	for _, job := range s.Jobs {
 		for _, item := range job.Items {
-			if item.Status == StatusFailed {
+			if item.Status == StatusFailed || item.Status == StatusNotFound {
 				return true
 			}
 		}
