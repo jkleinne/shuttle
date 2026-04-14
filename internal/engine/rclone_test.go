@@ -104,9 +104,11 @@ func TestScanRcloneProgress_ActiveTransfer_ShowsBytesLine(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) == 0 {
 		t.Fatal("onProgress was never called")
@@ -121,9 +123,11 @@ func TestScanRcloneProgress_ZeroBytesTransferred_ReturnsEmpty(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) != 0 {
 		t.Errorf("onProgress should not be called during check-only phase, got %d calls: %v", len(called), called)
@@ -135,9 +139,11 @@ func TestScanRcloneProgress_ChecksOnly_ReturnsEmpty(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) != 0 {
 		t.Errorf("onProgress should not be called for checks-only output, got %d calls", len(called))
@@ -150,9 +156,11 @@ func TestScanRcloneProgress_CountOnlyTransferred_Ignored(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) != 0 {
 		t.Errorf("onProgress should not be called for count-only transferred line, got %d calls", len(called))
@@ -164,7 +172,9 @@ func TestScanRcloneProgress_NilCallback(t *testing.T) {
 	r := strings.NewReader(input)
 
 	// Should not panic
-	scanRcloneProgress(r, nil)
+	if err := scanRcloneProgress(r, nil); err != nil {
+		t.Fatalf("scanRcloneProgress(nil): %v", err)
+	}
 }
 
 func TestScanRcloneProgress_ConcatenatedPerFileProgress(t *testing.T) {
@@ -175,9 +185,11 @@ func TestScanRcloneProgress_ConcatenatedPerFileProgress(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) == 0 {
 		t.Fatal("onProgress was never called for concatenated per-file + Transferred line")
@@ -201,9 +213,11 @@ func TestScanRcloneProgress_CheckThenTransfer(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) == 0 {
 		t.Fatal("onProgress was never called after transfer started")
@@ -219,9 +233,11 @@ func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 	r := strings.NewReader(input)
 
 	var called []string
-	scanRcloneProgress(r, func(text string) {
+	if err := scanRcloneProgress(r, func(text string) {
 		called = append(called, text)
-	})
+	}); err != nil {
+		t.Fatalf("scanRcloneProgress: %v", err)
+	}
 
 	if len(called) < 2 {
 		t.Fatalf("expected at least 2 calls, got %d", len(called))
