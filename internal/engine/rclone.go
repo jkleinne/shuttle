@@ -30,10 +30,10 @@ func NewRcloneExecutor(logger *log.Logger, logFile string) *RcloneExecutor {
 	return &RcloneExecutor{logger: logger, logFile: logFile}
 }
 
-// rcloneProgressTracker accumulates rclone -P stderr output and surfaces the
-// most informative progress line. The Transferred bytes-with-speed line
-// takes precedence over the Checks line because it carries transfer rate
-// information, which is more actionable to the user.
+// rcloneProgressTracker accumulates rclone -P stdout output and surfaces the
+// most informative progress line. When files are actively transferring, the
+// bytes line (with speed and ETA) takes precedence. When rclone is only
+// checking files (Transferred shows "0 B / 0 B"), the Checks line is shown.
 type rcloneProgressTracker struct {
 	lastBytesLine  string
 	lastChecksLine string
@@ -46,7 +46,13 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 	switch {
 	case strings.HasPrefix(trimmed, "Transferred:") && strings.Contains(trimmed, "/s"):
 		colonIdx := strings.IndexByte(trimmed, ':')
-		t.lastBytesLine = strings.TrimSpace(trimmed[colonIdx+1:])
+		value := strings.TrimSpace(trimmed[colonIdx+1:])
+		// Only treat as active transfer when bytes are non-zero.
+		// Rclone always emits "0 B / 0 B, -, 0 B/s, ETA -" even during
+		// check-only runs; showing that is noise.
+		if !strings.HasPrefix(value, "0 B / 0 B") {
+			t.lastBytesLine = value
+		}
 	case strings.HasPrefix(trimmed, "Checks:"):
 		colonIdx := strings.IndexByte(trimmed, ':')
 		t.lastChecksLine = strings.TrimSpace(trimmed[colonIdx+1:])
@@ -96,7 +102,8 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	start := time.Now()
 
 	cmd := exec.CommandContext(ctx, "rclone", args...)
-	cmd.Stderr = io.Discard
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -119,6 +126,14 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	pipeWg.Wait()
 	runErr := cmd.Wait()
 	elapsed := time.Since(start)
+
+	if stderrBuf.Len() > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(stderrBuf.String()), "\n") {
+			if line != "" {
+				e.logger.FileError(line)
+			}
+		}
+	}
 
 	var stats TransferStats
 	if e.logFile != "" {
