@@ -93,7 +93,6 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	if err := r.checkPrerequisites(opts); err != nil {
 		return Summary{}, fmt.Errorf("prerequisites: %w", err)
 	}
-
 	if err := r.acquireLock(); err != nil {
 		return Summary{}, err
 	}
@@ -102,64 +101,89 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	timestamp := start.Format("2006-01-02_150405")
 
 	var jobs []JobResult
-
 	for _, job := range r.cfg.Jobs {
-		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-			r.pw.SkipJob(job.Name)
-			jobs = append(jobs, JobResult{
-				Name:  job.Name,
-				Items: []ItemResult{{Name: job.Name, Status: StatusSkipped}},
-			})
-			continue
-		}
-
-		switch job.Engine {
-		case config.EngineRsync:
-			r.logHeader(fmt.Sprintf("Syncing: %s", job.Name))
-			jobResult := r.runRsyncJob(ctx, job)
-			jobs = append(jobs, jobResult)
-
-		case config.EngineRclone:
-			var rcloneDefaults *config.RcloneDefaults
-			if r.cfg.Defaults != nil {
-				rcloneDefaults = r.cfg.Defaults.Rclone
-			}
-			WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
-			remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
-			if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
-				r.pw.SkipJob(job.Name)
-				jobs = append(jobs, JobResult{
-					Name:  job.Name,
-					Items: []ItemResult{{Name: job.Name, Status: StatusSkipped}},
-				})
-				continue
-			}
-			for _, remote := range remotes {
-				r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
-				if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
-					r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
-				}
-				jobResult := r.runRcloneJob(ctx, job, remote, timestamp)
-				jobs = append(jobs, jobResult)
-			}
-		}
+		jobs = append(jobs, r.dispatchJob(ctx, job, opts, timestamp)...)
 	}
 
-	summary := Summary{
+	return Summary{
 		Jobs:     jobs,
 		Duration: time.Since(start),
 		DryRun:   opts.DryRun,
+		Errors:   collectErrors(jobs),
+	}, nil
+}
+
+// dispatchJob routes a single configured job through the skip filter and its
+// engine-specific execution path. Rsync jobs produce exactly one JobResult;
+// rclone jobs produce one JobResult per target remote, or a single skipped
+// result when the user's --remote filter excludes every configured remote.
+func (r *Runner) dispatchJob(ctx context.Context, job config.Job, opts RunOptions, timestamp string) []JobResult {
+	if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
+		r.pw.SkipJob(job.Name)
+		return []JobResult{skippedJobResult(job.Name)}
 	}
 
+	switch job.Engine {
+	case config.EngineRsync:
+		r.logHeader(fmt.Sprintf("Syncing: %s", job.Name))
+		return []JobResult{r.runRsyncJob(ctx, job)}
+
+	case config.EngineRclone:
+		return r.dispatchRclone(ctx, job, opts, timestamp)
+	}
+	return nil
+}
+
+// dispatchRclone expands an rclone job over its remotes, applying the
+// user's --remote filter and running archive cleanup and the sync for each
+// target. WarnFlagConflicts runs once per job (not per remote) since the
+// flag set is identical across remotes.
+func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOptions, timestamp string) []JobResult {
+	var rcloneDefaults *config.RcloneDefaults
+	if r.cfg.Defaults != nil {
+		rcloneDefaults = r.cfg.Defaults.Rclone
+	}
+	WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
+
+	remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
+	if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
+		r.pw.SkipJob(job.Name)
+		return []JobResult{skippedJobResult(job.Name)}
+	}
+
+	results := make([]JobResult, 0, len(remotes))
+	for _, remote := range remotes {
+		r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
+		if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
+			r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
+		}
+		results = append(results, r.runRcloneJob(ctx, job, remote, timestamp))
+	}
+	return results
+}
+
+// skippedJobResult builds the placeholder JobResult used when a job is filtered
+// out by --skip, --only, or an empty --remote intersection.
+func skippedJobResult(name string) JobResult {
+	return JobResult{
+		Name:  name,
+		Items: []ItemResult{{Name: name, Status: StatusSkipped}},
+	}
+}
+
+// collectErrors walks all item results and formats "<job>[→remote]/<item>"
+// labels for each failed or missing item. The label format is the same one
+// the summary renderer uses for error lines.
+func collectErrors(jobs []JobResult) []string {
+	var errs []string
 	for _, j := range jobs {
 		for _, item := range j.Items {
 			if item.Status == StatusFailed || item.Status == StatusNotFound {
-				summary.Errors = append(summary.Errors, fmt.Sprintf("%s/%s", jobLabel(j.Name, j.Remote), item.Name))
+				errs = append(errs, fmt.Sprintf("%s/%s", jobLabel(j.Name, j.Remote), item.Name))
 			}
 		}
 	}
-
-	return summary, nil
+	return errs
 }
 
 // runRsyncJob iterates each source in the job and calls rsync.
