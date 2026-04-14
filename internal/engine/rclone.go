@@ -58,7 +58,7 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 	return t.lastChecksLine
 }
 
-// scanRcloneProgress reads rclone stderr (-P output) line by line, extracts
+// scanRcloneProgress reads rclone -P progress output line by line, extracts
 // progress updates, and forwards each to onProgress. If onProgress is nil,
 // the reader is drained without parsing.
 func scanRcloneProgress(r io.Reader, onProgress func(string)) {
@@ -77,10 +77,9 @@ func scanRcloneProgress(r io.Reader, onProgress func(string)) {
 }
 
 // Exec runs rclone with the given pre-assembled argument list.
-// Stderr is piped to a goroutine that parses -P progress output and forwards
-// updates to onProgress (nil disables callbacks). Stdout is discarded since
-// rclone writes structured output to the log file. Stats are parsed from the
-// log file section written during this call.
+// Stdout is piped to a goroutine that parses -P progress output (rclone writes
+// progress to stdout, not stderr). Stats are parsed from the log file section
+// written during this call.
 func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
 	// Display name from second-to-last arg (source).
 	source := ""
@@ -97,9 +96,9 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	start := time.Now()
 
 	cmd := exec.CommandContext(ctx, "rclone", args...)
-	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 
-	stderr, err := cmd.StderrPipe()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		e.logger.FileError(fmt.Sprintf("rclone pipe setup failed for %s: %v", displayName, err))
 		return ItemResult{Name: displayName, Status: StatusFailed}
@@ -114,7 +113,7 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	pipeWg.Add(1)
 	go func() {
 		defer pipeWg.Done()
-		scanRcloneProgress(stderr, onProgress)
+		scanRcloneProgress(stdout, onProgress)
 	}()
 
 	pipeWg.Wait()
