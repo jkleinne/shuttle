@@ -20,8 +20,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build
+        run: go build ./...
+
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
   lint:
     name: Lint
