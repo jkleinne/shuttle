@@ -38,7 +38,7 @@ func TestShouldRunJob_SkipLogic(t *testing.T) {
 	}{
 		{"no filters", nil, nil, "photos", true},
 		{"skip photos", []string{"photos"}, nil, "photos", false},
-		{"skip photos, run secrets", []string{"photos"}, nil, "projects", true},
+		{"skip photos, run projects", []string{"photos"}, nil, "projects", true},
 		{"only docs", nil, []string{"docs"}, "photos", false},
 		{"only photos", nil, []string{"photos"}, "photos", true},
 	}

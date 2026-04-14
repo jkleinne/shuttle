@@ -4,22 +4,22 @@ flags = ["-a", "-v", "-h", "-P"]
 [defaults.rclone]
 flags = ["--copy-links", "--fast-list"]
 filter_file = "~/.config/rclone/filters.txt"
-transfers = 6
-checkers = 16
+transfers = 4
+checkers = 8
 bwlimit = "10M"
 drive_chunk_size = "64M"
 buffer_size = "64M"
 use_mmap = true
 timeout = "10m"
-contimeout = "90s"
-low_level_retries = 15
+contimeout = "60s"
+low_level_retries = 10
 order_by = "modtime,asc"
 
 [[job]]
 name = "photos"
 engine = "rsync"
 sources = ["/tmp/src/photos/"]
-destination = "~/Comics/"
+destination = "~/Pictures/Backup/"
 delete = false
 extra_flags = ["--exclude=.*"]
 
@@ -31,7 +31,7 @@ sources = [
     "~/Projects/app-two",
     "~/Projects/notes.txt",
 ]
-destination = "/tmp/dst/secrets"
+destination = "/tmp/dst/projects"
 delete = true
 
 [[job]]

@@ -31,8 +31,8 @@ func TestLoad_ValidConfig_ParsesAllFields(t *testing.T) {
 	if cfg.Defaults.Rclone == nil {
 		t.Fatal("Defaults.Rclone is nil, want non-nil")
 	}
-	if cfg.Defaults.Rclone.Transfers != 6 {
-		t.Errorf("Defaults.Rclone.Transfers = %d, want 6", cfg.Defaults.Rclone.Transfers)
+	if cfg.Defaults.Rclone.Transfers != 4 {
+		t.Errorf("Defaults.Rclone.Transfers = %d, want 4", cfg.Defaults.Rclone.Transfers)
 	}
 	if len(cfg.Defaults.Rclone.Flags) != 2 {
 		t.Errorf("Defaults.Rclone.Flags len = %d, want 2", len(cfg.Defaults.Rclone.Flags))

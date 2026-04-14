@@ -11,46 +11,44 @@ flags = ["-a", "-v", "-h", "-P", "-u", "--exclude=.DS_Store"]
 
 [defaults.rclone]
 flags = ["--copy-links", "--fast-list", "--track-renames", "--track-renames-strategy", "modtime,size", "--update"]
-filter_file = "~/.config/rclone/filters.txt"
-transfers = 6
-checkers = 16
+# filter_file = "~/.config/rclone/filters.txt"
+transfers = 4
+checkers = 8
 bwlimit = "10M"
 drive_chunk_size = "64M"
 buffer_size = "64M"
 use_mmap = true
 timeout = "10m"
-contimeout = "90s"
-low_level_retries = 15
+contimeout = "60s"
+low_level_retries = 10
 order_by = "modtime,asc"
 
 # -- Jobs, executed in config order --
 # Each job declares an engine ("rsync" or "rclone") and the fields
 # relevant to that engine.
 
-# Rsync job: sync photos to iCloud
+# Rsync job: sync photos to an external drive
 [[job]]
 name = "photos"
 engine = "rsync"
-sources = ["/tmp/src/photos/"]
-destination = "~/Pictures/Backup/"
+sources = ["~/Pictures/Photos/"]
+destination = "/Volumes/Backup/Photos/"
 delete = false
 extra_flags = ["--exclude=.*"]
 
-# Rsync job: back up secrets to external drive
+# Rsync job: back up projects to an external drive
 [[job]]
 name = "projects"
 engine = "rsync"
 sources = [
     "~/Projects/app-one",
     "~/Projects/app-two",
-    "~/Projects/notes.txt",
-    "~/Projects/app-three",
-    "~/.config/rclone",
 ]
-destination = "/Volumes/Backup/Secrets/secrets"
+destination = "/Volumes/Backup/Projects/"
 delete = true
 
 # Rclone job: sync documents to multiple cloud remotes
+# Remotes must already be configured in rclone (run `rclone config`).
 [[job]]
 name = "documents-to-cloud"
 engine = "rclone"
@@ -60,11 +58,11 @@ mode = "sync"
 backup_path = "_archive"
 backup_retention_days = 365
 
-# Rclone job: copy music (bandwidth-limited)
+# Rclone job: copy media (bandwidth-limited)
 [[job]]
-name = "music-to-cloud"
+name = "media-to-cloud"
 engine = "rclone"
-source = "/Volumes/Backup/Music"
+source = "/Volumes/Backup/Media"
 remotes = ["my_gdrive"]
 mode = "copy"
 bwlimit = "2M"

@@ -312,10 +312,10 @@ func TestRenderSummary_RsyncMultipleSources(t *testing.T) {
 	RenderSummary(&buf, s, false)
 	out := buf.String()
 
-	if !strings.Contains(out, "photoss:") {
+	if !strings.Contains(out, "gallery:") {
 		t.Error("missing source name for multi-source job")
 	}
-	if !strings.Contains(out, ".minisig:") {
+	if !strings.Contains(out, "readme:") {
 		t.Error("missing second source name")
 	}
 	if !strings.Contains(out, "42 transferred") {
@@ -537,7 +537,7 @@ func TestRenderSummary_SkippedJob(t *testing.T) {
 	RenderSummary(&buf, s, false)
 	out := buf.String()
 
-	if !strings.Contains(out, "– secrets") {
+	if !strings.Contains(out, "– projects") {
 		t.Error("skipped job should show – symbol")
 	}
 	if !strings.Contains(out, "skipped") {
