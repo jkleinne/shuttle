@@ -94,7 +94,7 @@ brews:
   - name: shuttle
     repository:
       owner: jkleinne
-      name: homebrew-tap
+      name: homebrew-tools
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/jkleinne/shuttle"
