@@ -20,12 +20,30 @@ const (
 	colorReset  = "\033[0m"
 )
 
+// Verbosity controls how much terminal output Logger emits. File output
+// is always written at full detail (including Debug) regardless of level.
+type Verbosity int
+
+// Verbosity levels. VerbosityNormal is the default; callers change it via
+// SetVerbosity after constructing a Logger.
+const (
+	VerbosityQuiet   Verbosity = -1
+	VerbosityNormal  Verbosity = 0
+	VerbosityVerbose Verbosity = 1
+)
+
 // Logger writes to both a terminal stream (with optional color) and a plain
-// text log file (with timestamps). Callers must call Close when done.
+// text log file (with timestamps). Informational messages (Header, Info,
+// Success, Debug) go to terminal; diagnostics (Warn, Error) go to stderr.
+// By default stderr == terminal (backwards-compatible for tests capturing a
+// single writer); New wires the real os.Stderr. Callers must call Close
+// when done.
 type Logger struct {
-	terminal io.Writer
-	file     *os.File
-	useColor bool
+	terminal  io.Writer
+	stderr    io.Writer
+	file      *os.File
+	useColor  bool
+	verbosity Verbosity
 }
 
 // New creates a Logger that writes colored output to os.Stdout and plain text
@@ -43,17 +61,26 @@ func New(logDir string, useColor bool) (*Logger, string, error) {
 		return nil, "", fmt.Errorf("creating log file %s: %w", logPath, err)
 	}
 
-	return &Logger{terminal: os.Stdout, file: f, useColor: useColor}, logPath, nil
+	return &Logger{terminal: os.Stdout, stderr: os.Stderr, file: f, useColor: useColor}, logPath, nil
 }
 
 // NewWithWriter creates a Logger with a custom terminal writer and a log file at
 // logPath. Intended for use in tests where terminal output needs to be captured.
+// The same writer receives both informational and diagnostic messages; callers
+// that need to assert stream separation should use SetStderr.
 func NewWithWriter(terminal io.Writer, logPath string, useColor bool) (*Logger, error) {
 	f, err := os.Create(logPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating log file %s: %w", logPath, err)
 	}
-	return &Logger{terminal: terminal, file: f, useColor: useColor}, nil
+	return &Logger{terminal: terminal, stderr: terminal, file: f, useColor: useColor}, nil
+}
+
+// SetStderr overrides the writer used for Warn and Error output. Tests that
+// need to distinguish stdout from stderr output call this to point them at
+// a separate buffer.
+func (l *Logger) SetStderr(w io.Writer) {
+	l.stderr = w
 }
 
 // Close closes the underlying log file. Should be called via defer after New or NewWithWriter.
@@ -71,39 +98,70 @@ func (l *Logger) LogPath() string {
 	return l.file.Name()
 }
 
+// SetVerbosity changes the terminal verbosity level. File output is unaffected:
+// every message type always lands in the log file at full detail.
+func (l *Logger) SetVerbosity(v Verbosity) {
+	l.verbosity = v
+}
+
+// Verbosity returns the current terminal verbosity level.
+func (l *Logger) Verbosity() Verbosity {
+	return l.verbosity
+}
+
 // Header logs a section separator with the given label.
-// Terminal: bold blue "==> label". File: "==> label".
+// Terminal: bold blue "==> label" (hidden in quiet mode). File: "==> label".
 func (l *Logger) Header(msg string) {
-	l.termf("\n%s%s==> %s%s\n", colorBold, colorBlue, msg, colorReset)
+	if l.verbosity >= VerbosityNormal {
+		l.termf("\n%s%s==> %s%s\n", colorBold, colorBlue, msg, colorReset)
+	}
 	l.filef("==> %s", msg)
 }
 
-// Info logs an informational message.
+// Info logs an informational message (hidden in quiet mode).
 // Terminal: blue "[INFO] msg". File: "[INFO] msg".
 func (l *Logger) Info(msg string) {
-	l.termf("%s[INFO]%s %s\n", colorBlue, colorReset, msg)
+	if l.verbosity >= VerbosityNormal {
+		l.termf("%s[INFO]%s %s\n", colorBlue, colorReset, msg)
+	}
 	l.filef("[INFO] %s", msg)
 }
 
-// Success logs a success message.
+// Success logs a success message (hidden in quiet mode).
 // Terminal: green "[OK] msg". File: "[OK] msg".
 func (l *Logger) Success(msg string) {
-	l.termf("%s[OK]%s %s\n", colorGreen, colorReset, msg)
+	if l.verbosity >= VerbosityNormal {
+		l.termf("%s[OK]%s %s\n", colorGreen, colorReset, msg)
+	}
 	l.filef("[OK] %s", msg)
 }
 
-// Warn logs a warning message.
-// Terminal: yellow "[WARN] msg". File: "[WARN] msg".
+// Warn logs a warning message to stderr. Hidden in quiet mode so cron jobs
+// using --quiet stay silent on first-run noise and benign issues; the log
+// file always records it.
 func (l *Logger) Warn(msg string) {
-	l.termf("%s[WARN]%s %s\n", colorYellow, colorReset, msg)
+	if l.verbosity >= VerbosityNormal {
+		l.errf("%s[WARN]%s %s\n", colorYellow, colorReset, msg)
+	}
 	l.filef("[WARN] %s", msg)
 }
 
-// Error logs an error message.
-// Terminal: red "[ERROR] msg". File: "[ERROR] msg".
+// Error logs an error message to stderr. Always shown regardless of verbosity:
+// in quiet-on-failure cron workflows, errors are the signal that triggers the
+// notification.
 func (l *Logger) Error(msg string) {
-	l.termf("%s[ERROR]%s %s\n", colorRed, colorReset, msg)
+	l.errf("%s[ERROR]%s %s\n", colorRed, colorReset, msg)
 	l.filef("[ERROR] %s", msg)
+}
+
+// Debug logs a diagnostic message. Terminal output appears only when verbosity
+// is VerbosityVerbose; the log file always receives the message.
+// File format: "[DEBUG] msg".
+func (l *Logger) Debug(msg string) {
+	if l.verbosity >= VerbosityVerbose {
+		l.termf("%s[DEBUG]%s %s\n", colorBold, colorReset, msg)
+	}
+	l.filef("[DEBUG] %s", msg)
 }
 
 // FileHeader writes a section header to the log file only.
@@ -131,6 +189,16 @@ func (l *Logger) termf(format string, args ...any) {
 		msg = stripAnsi(msg)
 	}
 	_, _ = fmt.Fprint(l.terminal, msg)
+}
+
+// errf formats and writes msg to the stderr stream with the same color
+// treatment as termf.
+func (l *Logger) errf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if !l.useColor {
+		msg = stripAnsi(msg)
+	}
+	_, _ = fmt.Fprint(l.stderr, msg)
 }
 
 // filef formats msg with a timestamp prefix and writes it to the log file.
@@ -169,6 +237,11 @@ func PruneOldLogs(logDir string, maxAgeDays int, now time.Time) (deleted int, wa
 
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// First-ever run: the log directory hasn't been created yet.
+			// Nothing to prune, and not a condition worth warning about.
+			return 0, nil, nil
+		}
 		return 0, nil, fmt.Errorf("reading log dir %s: %w", logDir, err)
 	}
 

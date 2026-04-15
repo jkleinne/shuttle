@@ -263,12 +263,139 @@ func TestPruneOldLogs_BoundaryAtRetentionEdge(t *testing.T) {
 	}
 }
 
-func TestPruneOldLogs_UnreadableDir_ReturnsError(t *testing.T) {
+func TestPruneOldLogs_NonexistentDir_IsNoOp(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
-	_, _, err := log.PruneOldLogs(dir, 30, now)
+	deleted, warnings, err := log.PruneOldLogs(dir, 30, now)
+	if err != nil {
+		t.Fatalf("unexpected error for missing dir: %v", err)
+	}
+	if deleted != 0 || len(warnings) != 0 {
+		t.Errorf("expected zero effect for missing dir, got deleted=%d warnings=%v", deleted, warnings)
+	}
+}
+
+func TestPruneOldLogs_UnreadableDir_ReturnsError(t *testing.T) {
+	// A regular file standing in where a directory is expected: ReadDir
+	// fails with ENOTDIR, which is not IsNotExist, so we surface an error.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing blocker: %v", err)
+	}
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	_, _, err := log.PruneOldLogs(blocker, 30, now)
 	if err == nil {
-		t.Fatal("expected error for nonexistent directory, got nil")
+		t.Fatal("expected error when ReadDir fails on a non-directory, got nil")
+	}
+}
+
+func TestLogger_Quiet_SuppressesAllButError(t *testing.T) {
+	var stdoutBuf, stderrBuf bytes.Buffer
+	logDir := t.TempDir()
+	logFile := filepath.Join(logDir, "test.log")
+
+	logger, err := log.NewWithWriter(&stdoutBuf, logFile, false)
+	if err != nil {
+		t.Fatalf("NewWithWriter: %v", err)
+	}
+	defer logger.Close()
+	logger.SetStderr(&stderrBuf)
+	logger.SetVerbosity(log.VerbosityQuiet)
+
+	logger.Header("section")
+	logger.Info("info msg")
+	logger.Success("ok msg")
+	logger.Warn("warn msg")
+	logger.Error("err msg")
+
+	if stdoutBuf.Len() != 0 {
+		t.Errorf("quiet stdout should be empty, got %q", stdoutBuf.String())
+	}
+	stderrOut := stderrBuf.String()
+	if strings.Contains(stderrOut, "warn msg") {
+		t.Errorf("quiet stderr should suppress warnings, got %q", stderrOut)
+	}
+	if !strings.Contains(stderrOut, "err msg") {
+		t.Errorf("quiet stderr should still emit errors, got %q", stderrOut)
+	}
+
+	fileBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	fileOut := string(fileBytes)
+	for _, wanted := range []string{"==> section", "[INFO] info msg", "[OK] ok msg", "[WARN] warn msg", "[ERROR] err msg"} {
+		if !strings.Contains(fileOut, wanted) {
+			t.Errorf("file should contain %q regardless of verbosity", wanted)
+		}
+	}
+}
+
+func TestLogger_WarnErrorGoToStderr(t *testing.T) {
+	var stdoutBuf, stderrBuf bytes.Buffer
+	logDir := t.TempDir()
+	logFile := filepath.Join(logDir, "test.log")
+
+	logger, err := log.NewWithWriter(&stdoutBuf, logFile, false)
+	if err != nil {
+		t.Fatalf("NewWithWriter: %v", err)
+	}
+	defer logger.Close()
+	logger.SetStderr(&stderrBuf)
+
+	logger.Warn("heads up")
+	logger.Error("broke")
+
+	if strings.Contains(stdoutBuf.String(), "heads up") || strings.Contains(stdoutBuf.String(), "broke") {
+		t.Errorf("warn/error should not land on stdout, got %q", stdoutBuf.String())
+	}
+	if !strings.Contains(stderrBuf.String(), "heads up") {
+		t.Errorf("stderr should contain warning, got %q", stderrBuf.String())
+	}
+	if !strings.Contains(stderrBuf.String(), "broke") {
+		t.Errorf("stderr should contain error, got %q", stderrBuf.String())
+	}
+}
+
+func TestLogger_Debug_OnlyInVerboseMode(t *testing.T) {
+	tests := []struct {
+		name          string
+		verbosity     log.Verbosity
+		wantOnTerm    bool
+	}{
+		{"normal suppresses Debug terminal", log.VerbosityNormal, false},
+		{"quiet suppresses Debug terminal", log.VerbosityQuiet, false},
+		{"verbose shows Debug on terminal", log.VerbosityVerbose, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var termBuf bytes.Buffer
+			logDir := t.TempDir()
+			logFile := filepath.Join(logDir, "test.log")
+
+			logger, err := log.NewWithWriter(&termBuf, logFile, false)
+			if err != nil {
+				t.Fatalf("NewWithWriter: %v", err)
+			}
+			defer logger.Close()
+			logger.SetVerbosity(tc.verbosity)
+
+			logger.Debug("exec: rsync -a src dst")
+
+			termOut := termBuf.String()
+			hasOnTerm := strings.Contains(termOut, "exec: rsync -a src dst")
+			if hasOnTerm != tc.wantOnTerm {
+				t.Errorf("terminal has debug output = %v, want %v; got: %q", hasOnTerm, tc.wantOnTerm, termOut)
+			}
+
+			fileBytes, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("reading log file: %v", err)
+			}
+			if !strings.Contains(string(fileBytes), "[DEBUG] exec: rsync -a src dst") {
+				t.Errorf("file should always contain debug line, got: %q", string(fileBytes))
+			}
+		})
 	}
 }
 

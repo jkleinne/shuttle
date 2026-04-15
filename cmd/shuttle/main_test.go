@@ -277,6 +277,113 @@ destination = %q
 	}
 }
 
+func TestCLI_QuietAndVerbose_MutuallyExclusive(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	toml := fmt.Sprintf(`
+[[job]]
+name = "x"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, src, dst)
+	env := writeConfig(t, toml)
+	result := runShuttle(t, env, "--quiet", "--verbose")
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "mutually exclusive") {
+		t.Errorf("stderr = %q, want it to mention 'mutually exclusive'", result.stderr)
+	}
+}
+
+func TestCLI_Quiet_SuppressesStdoutOnSuccess(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	toml := fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "quiet-test"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, src, dst)
+	env := writeConfig(t, toml)
+	result := runShuttle(t, env, "--quiet")
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if result.stdout != "" {
+		t.Errorf("stdout should be empty in quiet success, got: %q", result.stdout)
+	}
+}
+
+func TestCLI_Quiet_PrintsSummaryOnStderrOnFailure(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	dst := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	toml := fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "quiet-fail"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, missing, dst)
+	env := writeConfig(t, toml)
+	result := runShuttle(t, env, "--quiet")
+	if result.exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s", result.exitCode, result.stderr)
+	}
+	if result.stdout != "" {
+		t.Errorf("stdout should be empty even on failure, got: %q", result.stdout)
+	}
+	if !strings.Contains(result.stderr, "Log:") {
+		t.Errorf("stderr should carry the summary + log path on failure, got: %q", result.stderr)
+	}
+}
+
+func TestCLI_Verbose_PrintsExecLines(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	toml := fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "verbose-test"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, src, dst)
+	env := writeConfig(t, toml)
+	result := runShuttle(t, env, "--verbose")
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stdout, "exec: rsync") {
+		t.Errorf("verbose stdout should contain 'exec: rsync ...', got: %q", result.stdout)
+	}
+}
+
 func TestCLI_MissingSource_PartialFailure(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")

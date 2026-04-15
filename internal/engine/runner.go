@@ -225,6 +225,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		r.logInfo(fmt.Sprintf("Destination: %s", job.Destination))
 
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
+		r.logger.Debug(fmt.Sprintf("exec: rsync %s", strings.Join(args, " ")))
 
 		r.pw.StartJob(ctx, label)
 		result := r.rsync.Exec(ctx, args, r.pw.ProgressCallback())
@@ -289,6 +290,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 
 	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
+	r.logger.Debug(fmt.Sprintf("exec: rclone %s", strings.Join(args, " ")))
 
 	r.pw.StartJob(ctx, label)
 	result := r.rclone.Exec(ctx, args, r.pw.ProgressCallback())

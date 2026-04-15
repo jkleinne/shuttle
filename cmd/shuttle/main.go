@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,16 +38,23 @@ func run() int {
 	var runOpts engine.RunOptions
 	var skipJobs, onlyJobs, selectedRemotes []string
 	var colorMode string
+	var quiet, verbose bool
 
 	rootCmd := &cobra.Command{
 		Use:   "shuttle",
 		Short: "Automated backup and synchronization tool",
 		// No subcommand: delegate to executeRun so `shuttle --dry-run` works.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return validateColorMode(colorMode)
+			if err := validateColorMode(colorMode); err != nil {
+				return err
+			}
+			if quiet && verbose {
+				return fmt.Errorf("--quiet and --verbose are mutually exclusive")
+			}
+			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, runOpts)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, resolveVerbosity(quiet, verbose), runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -56,7 +64,7 @@ func run() int {
 		Use:   "run",
 		Short: "Execute sync tasks (default when no subcommand given)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, runOpts)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, resolveVerbosity(quiet, verbose), runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -98,6 +106,8 @@ func run() int {
 		cmd.Flags().StringArrayVar(&onlyJobs, "only", nil, "Run only named jobs (repeatable; mutually exclusive with --skip)")
 		cmd.Flags().StringArrayVar(&selectedRemotes, "remote", nil, "Target specific cloud remote by name (repeatable)")
 		cmd.Flags().StringVar(&colorMode, "color", colorAuto, "Colorize terminal output: auto|always|never")
+		cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output on success (mutually exclusive with --verbose)")
+		cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show executed commands and extra diagnostics (mutually exclusive with --quiet)")
 	}
 
 	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
@@ -161,6 +171,20 @@ func validateColorMode(mode string) error {
 	}
 }
 
+// resolveVerbosity collapses the two boolean CLI flags into the Logger's
+// Verbosity enum. The caller has already ensured quiet and verbose are not
+// both set (via PersistentPreRunE).
+func resolveVerbosity(quiet, verbose bool) log.Verbosity {
+	switch {
+	case quiet:
+		return log.VerbosityQuiet
+	case verbose:
+		return log.VerbosityVerbose
+	default:
+		return log.VerbosityNormal
+	}
+}
+
 // resolveColor decides whether ANSI color output should be enabled.
 // The NO_COLOR environment variable (any non-empty value) always forces
 // color off regardless of mode, per https://no-color.org. In "auto" mode
@@ -185,7 +209,7 @@ var errPartialFailure = fmt.Errorf("one or more tasks failed")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
 // rclone config password, then runs the full sync pipeline.
-func executeRun(ctx context.Context, skip, only, remotes []string, colorMode string, opts engine.RunOptions) error {
+func executeRun(ctx context.Context, skip, only, remotes []string, colorMode string, verbosity log.Verbosity, opts engine.RunOptions) error {
 	opts.SkipJobs = skip
 	opts.OnlyJobs = only
 	opts.SelectedRemotes = remotes
@@ -223,6 +247,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, colorMode str
 		return fmt.Errorf("setting up logging: %w", err)
 	}
 	defer logger.Close()
+	logger.SetVerbosity(verbosity)
 
 	logger.Header("Shuttle Started")
 	if opts.DryRun {
@@ -240,15 +265,34 @@ func executeRun(ctx context.Context, skip, only, remotes []string, colorMode str
 
 	promptForPassword(logger)
 
-	pw := engine.NewProgressWriter(os.Stdout, interactive, useColor)
+	// In quiet mode, the per-job spinner and status lines are suppressed so
+	// the terminal stays silent unless something fails.
+	progressOut := io.Writer(os.Stdout)
+	progressInteractive := interactive
+	if verbosity == log.VerbosityQuiet {
+		progressOut = io.Discard
+		progressInteractive = false
+	}
+
+	pw := engine.NewProgressWriter(progressOut, progressInteractive, useColor)
 	runner := engine.NewRunner(cfg, configPath, logger, pw, opts.DryRun, logPath)
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
 		return err
 	}
 
-	engine.RenderSummary(os.Stdout, summary, useColor)
-	fmt.Printf("\nLog: %s\n", logPath)
+	if verbosity == log.VerbosityQuiet {
+		// Quiet-on-success: print nothing. On failure, route the summary and
+		// log pointer to stderr so cron-style "only notify on error" wrappers
+		// still have context.
+		if summary.HasErrors() {
+			engine.RenderSummary(os.Stderr, summary, useColor)
+			fmt.Fprintf(os.Stderr, "\nLog: %s\n", logPath)
+		}
+	} else {
+		engine.RenderSummary(os.Stdout, summary, useColor)
+		fmt.Printf("\nLog: %s\n", logPath)
+	}
 
 	if summary.HasErrors() {
 		return errPartialFailure
