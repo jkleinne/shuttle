@@ -385,6 +385,94 @@ destination = "/tmp/dst"
 	}
 }
 
+func TestLogRetentionDays_Unset_ReturnsDefault(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "j"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := cfg.ResolvedLogRetentionDays()
+	if got != config.DefaultLogRetentionDays {
+		t.Errorf("ResolvedLogRetentionDays() = %d, want %d", got, config.DefaultLogRetentionDays)
+	}
+}
+
+func TestLogRetentionDays_ExplicitZero_DisablesPruning(t *testing.T) {
+	tomlData := `
+[defaults]
+log_retention_days = 0
+
+[[job]]
+name = "j"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.ResolvedLogRetentionDays(); got != 0 {
+		t.Errorf("ResolvedLogRetentionDays() = %d, want 0", got)
+	}
+}
+
+func TestLogRetentionDays_ExplicitPositive_UsesValue(t *testing.T) {
+	tomlData := `
+[defaults]
+log_retention_days = 7
+
+[[job]]
+name = "j"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.ResolvedLogRetentionDays(); got != 7 {
+		t.Errorf("ResolvedLogRetentionDays() = %d, want 7", got)
+	}
+}
+
+func TestLogRetentionDays_Negative_ReturnsError(t *testing.T) {
+	tomlData := `
+[defaults]
+log_retention_days = -1
+
+[[job]]
+name = "j"
+engine = "rsync"
+sources = ["/tmp/a"]
+destination = "/tmp/b"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for negative log_retention_days, got nil")
+	}
+	if !strings.Contains(err.Error(), "log_retention_days") {
+		t.Errorf("error %q should mention \"log_retention_days\"", err.Error())
+	}
+}
+
+func TestLogRetentionDays_NoDefaultsSection_ReturnsDefault(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(``))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.ResolvedLogRetentionDays(); got != config.DefaultLogRetentionDays {
+		t.Errorf("ResolvedLogRetentionDays() = %d, want %d", got, config.DefaultLogRetentionDays)
+	}
+}
+
 func TestLoad_NoJobs_EmptySlice(t *testing.T) {
 	tomlData := ``
 	cfg, err := config.LoadBytes([]byte(tomlData))

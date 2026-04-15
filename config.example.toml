@@ -1,10 +1,20 @@
 # Shuttle Configuration
 # Location: ${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml
 
-# -- Default flags for each engine (optional) --
-# Shuttle injects a small set of instrumentation flags (--stats, progress)
-# for stats capture. All other flags come from these defaults or per-job
-# extra_flags. Per-job fields override defaults via last-flag-wins.
+# -- Defaults --
+# [defaults] holds cross-cutting settings. [defaults.rsync] and
+# [defaults.rclone] hold engine-specific defaults (flags, tuning).
+# For engine flags, shuttle injects a small set of instrumentation flags
+# (--stats, progress) for stats capture. All other flags come from the
+# engine defaults below or per-job extra_flags. Per-job fields override
+# defaults via last-flag-wins.
+
+[defaults]
+# log_retention_days: age (in days) after which per-run log files under
+# ${XDG_STATE_HOME:-~/.local/state}/shuttle/logs/ are pruned on startup.
+# Default: 30. Set to 0 to disable pruning; negative values are rejected.
+# This setting is global — there is no per-job override.
+# log_retention_days = 14
 
 [defaults.rsync]
 flags = ["-a", "-v", "-h", "-P", "-u"]

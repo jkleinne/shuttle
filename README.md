@@ -93,6 +93,13 @@ shuttle version          Print version
 | `--skip <name>` | | Skip a job by name (repeatable, mutually exclusive with `--only`) |
 | `--only <name>` | | Run only the named job(s) (repeatable, mutually exclusive with `--skip`) |
 | `--remote <name>` | | Target a specific cloud remote (repeatable) |
+| `--color <when>` | | Colorize terminal output: `auto` (default), `always`, or `never`. The `NO_COLOR` environment variable always forces color off. |
+| `--quiet` | `-q` | Suppress stdout on success; on failure, route summary and log path to stderr. Mutually exclusive with `--verbose`. |
+| `--verbose` | `-v` | Print executed commands (`exec: rsync ...` / `exec: rclone ...`) in addition to normal output. Mutually exclusive with `--quiet`. |
+
+### Output streams
+
+Informational output (banners, progress, per-job status, the final summary) goes to **stdout**. Diagnostic output (`[WARN]`, `[ERROR]`) goes to **stderr**, matching rsync and rclone. Scripts redirecting with `shuttle > log.txt` capture only the informational stream; add `2>&1` to also capture diagnostics.
 
 ### Exit Codes
 
@@ -110,6 +117,12 @@ Config lives at `${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml`. See [`confi
 ### Defaults
 
 Optional baseline settings applied to all jobs of a given engine. Per-job fields override these.
+
+**`[defaults]`** (cross-cutting)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `log_retention_days` | int | Age (in days) after which per-run log files are pruned on startup. Defaults to 30. Set to `0` to disable pruning. Negative values are rejected. |
 
 **`[defaults.rsync]`**
 
@@ -197,6 +210,8 @@ backup_retention_days = 365
 ## Logging
 
 Logs are written to `${XDG_STATE_HOME:-~/.local/state}/shuttle/logs/`. Each run creates a timestamped log file. The path is printed at the end of every run.
+
+At startup Shuttle prunes log files older than `log_retention_days` (default 30) so the directory does not grow unbounded under regular cron use. Pruning is best-effort: a failure on any individual file is recorded as a warning and does not block the backup.
 
 ## Encrypted Rclone Remotes
 

@@ -247,7 +247,7 @@ func TestBuildTuningFlags_AllFields(t *testing.T) {
 func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
 	var buf strings.Builder
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false)
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
 func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
 	var buf strings.Builder
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false)
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
 func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
 	var buf strings.Builder
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false)
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
 func TestWarnFlagConflicts_NoConflict(t *testing.T) {
 	var buf strings.Builder
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false)
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
