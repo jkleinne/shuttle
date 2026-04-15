@@ -105,6 +105,57 @@ func writeConfig(t *testing.T, toml string) []string {
 	}
 }
 
+func TestResolveColor(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		stdoutIsTTY bool
+		noColorSet  bool
+		want        bool
+	}{
+		{"never + TTY", colorNever, true, false, false},
+		{"never + non-TTY", colorNever, false, false, false},
+		{"always + TTY", colorAlways, true, false, true},
+		{"always + non-TTY", colorAlways, false, false, true},
+		{"auto + TTY", colorAuto, true, false, true},
+		{"auto + non-TTY", colorAuto, false, false, false},
+		{"NO_COLOR overrides always + TTY", colorAlways, true, true, false},
+		{"NO_COLOR overrides always + non-TTY", colorAlways, false, true, false},
+		{"NO_COLOR overrides auto + TTY", colorAuto, true, true, false},
+		{"NO_COLOR overrides auto + non-TTY", colorAuto, false, true, false},
+		{"NO_COLOR with never", colorNever, true, true, false},
+		{"NO_COLOR with never non-TTY", colorNever, false, true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.noColorSet {
+				t.Setenv("NO_COLOR", "1")
+			} else {
+				t.Setenv("NO_COLOR", "")
+			}
+			got := resolveColor(tc.mode, tc.stdoutIsTTY)
+			if got != tc.want {
+				t.Errorf("resolveColor(%q, %v) = %v, want %v", tc.mode, tc.stdoutIsTTY, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateColorMode(t *testing.T) {
+	valid := []string{colorAuto, colorAlways, colorNever}
+	for _, m := range valid {
+		if err := validateColorMode(m); err != nil {
+			t.Errorf("validateColorMode(%q) returned error: %v", m, err)
+		}
+	}
+	invalid := []string{"", "yes", "true", "on", "AUTO"}
+	for _, m := range invalid {
+		if err := validateColorMode(m); err == nil {
+			t.Errorf("validateColorMode(%q) returned nil, want error", m)
+		}
+	}
+}
+
 func TestCLI_Version_PrintsVersionCommitAndDate(t *testing.T) {
 	env := []string{"PATH=" + os.Getenv("PATH")}
 	result := runShuttle(t, env, "version")
@@ -203,6 +254,26 @@ destination = %q
 	result := runShuttle(t, env)
 	if result.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_ColorFlag_InvalidValue_UsageError(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	toml := fmt.Sprintf(`
+[[job]]
+name = "x"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, src, dst)
+	env := writeConfig(t, toml)
+	result := runShuttle(t, env, "--color", "bogus")
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "invalid --color value") {
+		t.Errorf("stderr = %q, want it to contain 'invalid --color value'", result.stderr)
 	}
 }
 

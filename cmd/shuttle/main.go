@@ -36,13 +36,17 @@ func main() {
 func run() int {
 	var runOpts engine.RunOptions
 	var skipJobs, onlyJobs, selectedRemotes []string
+	var colorMode string
 
 	rootCmd := &cobra.Command{
 		Use:   "shuttle",
 		Short: "Automated backup and synchronization tool",
 		// No subcommand: delegate to executeRun so `shuttle --dry-run` works.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return validateColorMode(colorMode)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -52,7 +56,7 @@ func run() int {
 		Use:   "run",
 		Short: "Execute sync tasks (default when no subcommand given)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, runOpts)
+			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, runOpts)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -93,6 +97,7 @@ func run() int {
 		cmd.Flags().StringArrayVar(&skipJobs, "skip", nil, "Skip a job by name (repeatable; mutually exclusive with --only)")
 		cmd.Flags().StringArrayVar(&onlyJobs, "only", nil, "Run only named jobs (repeatable; mutually exclusive with --skip)")
 		cmd.Flags().StringArrayVar(&selectedRemotes, "remote", nil, "Target specific cloud remote by name (repeatable)")
+		cmd.Flags().StringVar(&colorMode, "color", colorAuto, "Colorize terminal output: auto|always|never")
 	}
 
 	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
@@ -136,13 +141,51 @@ const (
 	exitSignal         = 130 // Unix convention: 128 + SIGINT
 )
 
+// Valid values for the --color flag.
+const (
+	colorAuto   = "auto"
+	colorAlways = "always"
+	colorNever  = "never"
+)
+
+// validateColorMode returns an error when mode is not one of the supported
+// --color values. Matching is case-sensitive so "AUTO" is rejected, matching
+// the behavior of git, ripgrep, and ls.
+func validateColorMode(mode string) error {
+	switch mode {
+	case colorAuto, colorAlways, colorNever:
+		return nil
+	default:
+		return fmt.Errorf("invalid --color value %q; must be one of %q, %q, %q",
+			mode, colorAuto, colorAlways, colorNever)
+	}
+}
+
+// resolveColor decides whether ANSI color output should be enabled.
+// The NO_COLOR environment variable (any non-empty value) always forces
+// color off regardless of mode, per https://no-color.org. In "auto" mode
+// color follows stdoutIsTTY so piped or redirected output stays plain.
+func resolveColor(mode string, stdoutIsTTY bool) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	switch mode {
+	case colorAlways:
+		return true
+	case colorNever:
+		return false
+	default: // colorAuto
+		return stdoutIsTTY
+	}
+}
+
 // errPartialFailure is the sentinel returned by executeRun when at least one
 // sync item failed. The caller maps it to exitPartialFailure.
 var errPartialFailure = fmt.Errorf("one or more tasks failed")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
 // rclone config password, then runs the full sync pipeline.
-func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.RunOptions) error {
+func executeRun(ctx context.Context, skip, only, remotes []string, colorMode string, opts engine.RunOptions) error {
 	opts.SkipJobs = skip
 	opts.OnlyJobs = only
 	opts.SelectedRemotes = remotes
@@ -166,7 +209,9 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 	}
 
 	logDir := logDirectory()
-	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	useColor := resolveColor(colorMode, stdoutIsTTY)
+	interactive := stdoutIsTTY
 
 	// Prune stale logs before opening a new one so the new file doesn't
 	// count against the retention window. Failures here are operational
@@ -195,7 +240,7 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 
 	promptForPassword(logger)
 
-	pw := engine.NewProgressWriter(os.Stdout, useColor, useColor)
+	pw := engine.NewProgressWriter(os.Stdout, interactive, useColor)
 	runner := engine.NewRunner(cfg, configPath, logger, pw, opts.DryRun, logPath)
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
