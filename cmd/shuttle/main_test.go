@@ -113,7 +113,7 @@ func TestResolveColor(t *testing.T) {
 		name        string
 		mode        string
 		stdoutIsTTY bool
-		noColorSet  bool
+		noColor     bool
 		want        bool
 	}{
 		{"never + TTY", colorNever, true, false, false},
@@ -131,14 +131,10 @@ func TestResolveColor(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.noColorSet {
-				t.Setenv("NO_COLOR", "1")
-			} else {
-				t.Setenv("NO_COLOR", "")
-			}
-			got := resolveColor(tc.mode, tc.stdoutIsTTY)
+			got := resolveColor(tc.mode, tc.stdoutIsTTY, tc.noColor)
 			if got != tc.want {
-				t.Errorf("resolveColor(%q, %v) = %v, want %v", tc.mode, tc.stdoutIsTTY, got, tc.want)
+				t.Errorf("resolveColor(%q, %v, %v) = %v, want %v",
+					tc.mode, tc.stdoutIsTTY, tc.noColor, got, tc.want)
 			}
 		})
 	}

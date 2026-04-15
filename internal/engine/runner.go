@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -87,6 +88,34 @@ func (r *Runner) logError(msg string) {
 	}
 }
 
+// logWarn writes a warning, routed like logHeader so it does not interleave
+// with the live spinner in interactive mode. The warning still lands in the
+// log file; stderr output is skipped while the spinner owns the TTY.
+func (r *Runner) logWarn(msg string) {
+	if r.pw.Interactive() {
+		r.logger.FileWarn(msg)
+	} else {
+		r.logger.Warn(msg)
+	}
+}
+
+// formatExec joins argv into a single line for the "exec:" debug output.
+// Arguments containing whitespace are quoted via strconv.Quote so the line
+// is unambiguous; arguments without whitespace are left unquoted so the
+// common case remains readable.
+func formatExec(tool string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, tool)
+	for _, a := range args {
+		if strings.ContainsAny(a, " \t\n") {
+			parts = append(parts, strconv.Quote(a))
+		} else {
+			parts = append(parts, a)
+		}
+	}
+	return "exec: " + strings.Join(parts, " ")
+}
+
 // Run executes the full pipeline: prerequisites, lock, jobs, summary.
 // Partial failures are recorded in the summary but do not stop subsequent jobs.
 func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
@@ -155,7 +184,7 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 	for _, remote := range remotes {
 		r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
 		if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
-			r.logger.Warn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
+			r.logWarn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
 		}
 		results = append(results, r.runRcloneJob(ctx, job, remote, timestamp))
 	}
@@ -225,7 +254,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		r.logInfo(fmt.Sprintf("Destination: %s", job.Destination))
 
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
-		r.logger.Debug(fmt.Sprintf("exec: rsync %s", strings.Join(args, " ")))
+		r.logger.Debug(formatExec("rsync", args))
 
 		r.pw.StartJob(ctx, label)
 		result := r.rsync.Exec(ctx, args, r.pw.ProgressCallback())
@@ -290,7 +319,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 
 	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
-	r.logger.Debug(fmt.Sprintf("exec: rclone %s", strings.Join(args, " ")))
+	r.logger.Debug(formatExec("rclone", args))
 
 	r.pw.StartJob(ctx, label)
 	result := r.rclone.Exec(ctx, args, r.pw.ProgressCallback())

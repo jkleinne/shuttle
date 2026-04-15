@@ -32,29 +32,40 @@ func main() {
 	os.Exit(run())
 }
 
+// cliFlags holds the resolved CLI inputs for a single run. Collecting them in
+// one struct keeps executeRun's signature below the project's 3-parameter
+// threshold and makes it obvious which fields belong to the CLI boundary vs
+// the engine's RunOptions.
+type cliFlags struct {
+	RunOpts         engine.RunOptions
+	SkipJobs        []string
+	OnlyJobs        []string
+	SelectedRemotes []string
+	ColorMode       string
+	Quiet           bool
+	Verbose         bool
+}
+
 // run is the real entry point, returning an exit code so main stays testable.
 // Exit codes: 0 success, 1 partial task failure, 2 config/usage error, 130 signal.
 func run() int {
-	var runOpts engine.RunOptions
-	var skipJobs, onlyJobs, selectedRemotes []string
-	var colorMode string
-	var quiet, verbose bool
+	var cli cliFlags
 
 	rootCmd := &cobra.Command{
 		Use:   "shuttle",
 		Short: "Automated backup and synchronization tool",
 		// No subcommand: delegate to executeRun so `shuttle --dry-run` works.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateColorMode(colorMode); err != nil {
+			if err := validateColorMode(cli.ColorMode); err != nil {
 				return err
 			}
-			if quiet && verbose {
+			if cli.Quiet && cli.Verbose {
 				return fmt.Errorf("--quiet and --verbose are mutually exclusive")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, resolveVerbosity(quiet, verbose), runOpts)
+			return executeRun(cmd.Context(), cli)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -64,7 +75,7 @@ func run() int {
 		Use:   "run",
 		Short: "Execute sync tasks (default when no subcommand given)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return executeRun(cmd.Context(), skipJobs, onlyJobs, selectedRemotes, colorMode, resolveVerbosity(quiet, verbose), runOpts)
+			return executeRun(cmd.Context(), cli)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -101,13 +112,13 @@ func run() int {
 	// Register the same flags on both root and run so both invocation styles
 	// (`shuttle --dry-run` and `shuttle run --dry-run`) accept them.
 	for _, cmd := range []*cobra.Command{rootCmd, runCmd} {
-		cmd.Flags().BoolVarP(&runOpts.DryRun, "dry-run", "n", false, "Preview changes without modifying files")
-		cmd.Flags().StringArrayVar(&skipJobs, "skip", nil, "Skip a job by name (repeatable; mutually exclusive with --only)")
-		cmd.Flags().StringArrayVar(&onlyJobs, "only", nil, "Run only named jobs (repeatable; mutually exclusive with --skip)")
-		cmd.Flags().StringArrayVar(&selectedRemotes, "remote", nil, "Target specific cloud remote by name (repeatable)")
-		cmd.Flags().StringVar(&colorMode, "color", colorAuto, "Colorize terminal output: auto|always|never")
-		cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Suppress terminal output on success (mutually exclusive with --verbose)")
-		cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show executed commands and extra diagnostics (mutually exclusive with --quiet)")
+		cmd.Flags().BoolVarP(&cli.RunOpts.DryRun, "dry-run", "n", false, "Preview changes without modifying files")
+		cmd.Flags().StringArrayVar(&cli.SkipJobs, "skip", nil, "Skip a job by name (repeatable; mutually exclusive with --only)")
+		cmd.Flags().StringArrayVar(&cli.OnlyJobs, "only", nil, "Run only named jobs (repeatable; mutually exclusive with --skip)")
+		cmd.Flags().StringArrayVar(&cli.SelectedRemotes, "remote", nil, "Target specific cloud remote by name (repeatable)")
+		cmd.Flags().StringVar(&cli.ColorMode, "color", colorAuto, "Colorize terminal output: auto|always|never")
+		cmd.Flags().BoolVarP(&cli.Quiet, "quiet", "q", false, "Suppress terminal output on success (mutually exclusive with --verbose)")
+		cmd.Flags().BoolVarP(&cli.Verbose, "verbose", "v", false, "Show executed commands and extra diagnostics (mutually exclusive with --quiet)")
 	}
 
 	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
@@ -185,12 +196,13 @@ func resolveVerbosity(quiet, verbose bool) log.Verbosity {
 	}
 }
 
-// resolveColor decides whether ANSI color output should be enabled.
-// The NO_COLOR environment variable (any non-empty value) always forces
-// color off regardless of mode, per https://no-color.org. In "auto" mode
-// color follows stdoutIsTTY so piped or redirected output stays plain.
-func resolveColor(mode string, stdoutIsTTY bool) bool {
-	if os.Getenv("NO_COLOR") != "" {
+// resolveColor decides whether ANSI color output should be enabled based on
+// the --color mode, whether stdout is a TTY, and whether the NO_COLOR
+// environment variable is set. NO_COLOR forces color off regardless of mode
+// per https://no-color.org. Kept pure (no env access) so it is trivially
+// testable; the caller reads NO_COLOR at the boundary.
+func resolveColor(mode string, stdoutIsTTY, noColor bool) bool {
+	if noColor {
 		return false
 	}
 	switch mode {
@@ -209,10 +221,12 @@ var errPartialFailure = fmt.Errorf("one or more tasks failed")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
 // rclone config password, then runs the full sync pipeline.
-func executeRun(ctx context.Context, skip, only, remotes []string, colorMode string, verbosity log.Verbosity, opts engine.RunOptions) error {
-	opts.SkipJobs = skip
-	opts.OnlyJobs = only
-	opts.SelectedRemotes = remotes
+func executeRun(ctx context.Context, cli cliFlags) error {
+	opts := cli.RunOpts
+	opts.SkipJobs = cli.SkipJobs
+	opts.OnlyJobs = cli.OnlyJobs
+	opts.SelectedRemotes = cli.SelectedRemotes
+	verbosity := resolveVerbosity(cli.Quiet, cli.Verbose)
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -234,7 +248,8 @@ func executeRun(ctx context.Context, skip, only, remotes []string, colorMode str
 
 	logDir := logDirectory()
 	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
-	useColor := resolveColor(colorMode, stdoutIsTTY)
+	noColor := os.Getenv("NO_COLOR") != ""
+	useColor := resolveColor(cli.ColorMode, stdoutIsTTY, noColor)
 	interactive := stdoutIsTTY
 
 	// Prune stale logs before opening a new one so the new file doesn't
@@ -242,12 +257,11 @@ func executeRun(ctx context.Context, skip, only, remotes []string, colorMode str
 	// metadata issues, never a reason to block a backup run.
 	pruneDeleted, pruneWarnings, pruneErr := log.PruneOldLogs(logDir, cfg.ResolvedLogRetentionDays(), time.Now())
 
-	logger, logPath, err := log.New(logDir, useColor)
+	logger, logPath, err := log.New(logDir, useColor, verbosity)
 	if err != nil {
 		return fmt.Errorf("setting up logging: %w", err)
 	}
 	defer logger.Close()
-	logger.SetVerbosity(verbosity)
 
 	logger.Header("Shuttle Started")
 	if opts.DryRun {

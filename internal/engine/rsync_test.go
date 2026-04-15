@@ -15,7 +15,7 @@ import (
 func newTestLogger(t *testing.T) *log.Logger {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(os.Stdout, logPath, false)
+	logger, err := log.NewWithWriter(os.Stdout, logPath, false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("creating test logger: %v", err)
 	}

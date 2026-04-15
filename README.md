@@ -97,6 +97,10 @@ shuttle version          Print version
 | `--quiet` | `-q` | Suppress stdout on success; on failure, route summary and log path to stderr. Mutually exclusive with `--verbose`. |
 | `--verbose` | `-v` | Print executed commands (`exec: rsync ...` / `exec: rclone ...`) in addition to normal output. Mutually exclusive with `--quiet`. |
 
+### Output streams
+
+Informational output (banners, progress, per-job status, the final summary) goes to **stdout**. Diagnostic output (`[WARN]`, `[ERROR]`) goes to **stderr**, matching rsync and rclone. Scripts redirecting with `shuttle > log.txt` capture only the informational stream; add `2>&1` to also capture diagnostics.
+
 ### Exit Codes
 
 | Code | Meaning |

@@ -20,24 +20,29 @@ const (
 	colorReset  = "\033[0m"
 )
 
+// hoursPerDay is used when converting a retention window expressed in days
+// into a time.Duration. Extracted as a named constant per project rules
+// against unlabelled numeric literals.
+const hoursPerDay = 24
+
 // Verbosity controls how much terminal output Logger emits. File output
 // is always written at full detail (including Debug) regardless of level.
 type Verbosity int
 
-// Verbosity levels. VerbosityNormal is the default; callers change it via
-// SetVerbosity after constructing a Logger.
+// Verbosity levels. Callers pass the desired level to New/NewWithWriter at
+// construction time; there is no mutator so the logger's level can't drift
+// after the first write.
 const (
 	VerbosityQuiet   Verbosity = -1
 	VerbosityNormal  Verbosity = 0
 	VerbosityVerbose Verbosity = 1
 )
 
-// Logger writes to both a terminal stream (with optional color) and a plain
-// text log file (with timestamps). Informational messages (Header, Info,
-// Success, Debug) go to terminal; diagnostics (Warn, Error) go to stderr.
-// By default stderr == terminal (backwards-compatible for tests capturing a
-// single writer); New wires the real os.Stderr. Callers must call Close
-// when done.
+// Logger writes to three streams: an informational terminal stream
+// (typically os.Stdout), a diagnostic stream (typically os.Stderr), and a
+// plain-text log file with timestamps. Informational messages (Header,
+// Info, Success, Debug) go to terminal; diagnostics (Warn, Error) go to
+// stderr. Callers must call Close when done.
 type Logger struct {
 	terminal  io.Writer
 	stderr    io.Writer
@@ -46,14 +51,15 @@ type Logger struct {
 	verbosity Verbosity
 }
 
-// New creates a Logger that writes colored output to os.Stdout and plain text
-// to a timestamped log file under logDir. Returns the logger and the log file path.
-// The log directory is created if it does not exist.
-func New(logDir string, useColor bool) (*Logger, string, error) {
+// New creates a Logger that writes colored output to os.Stdout, diagnostic
+// output to os.Stderr, and plain text to a timestamped log file under logDir.
+// Returns the logger and the log file path. The log directory is created if
+// it does not exist.
+func New(logDir string, useColor bool, verbosity Verbosity) (*Logger, string, error) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, "", fmt.Errorf("creating log directory %s: %w", logDir, err)
 	}
-	timestamp := time.Now().Format("2006-01-02_150405")
+	timestamp := time.Now().Format(logFilenameLayout)
 	logPath := filepath.Join(logDir, timestamp+".log")
 
 	f, err := os.Create(logPath)
@@ -61,19 +67,31 @@ func New(logDir string, useColor bool) (*Logger, string, error) {
 		return nil, "", fmt.Errorf("creating log file %s: %w", logPath, err)
 	}
 
-	return &Logger{terminal: os.Stdout, stderr: os.Stderr, file: f, useColor: useColor}, logPath, nil
+	return &Logger{
+		terminal:  os.Stdout,
+		stderr:    os.Stderr,
+		file:      f,
+		useColor:  useColor,
+		verbosity: verbosity,
+	}, logPath, nil
 }
 
-// NewWithWriter creates a Logger with a custom terminal writer and a log file at
-// logPath. Intended for use in tests where terminal output needs to be captured.
-// The same writer receives both informational and diagnostic messages; callers
-// that need to assert stream separation should use SetStderr.
-func NewWithWriter(terminal io.Writer, logPath string, useColor bool) (*Logger, error) {
+// NewWithWriter creates a Logger with a custom terminal writer and a log
+// file at logPath. Intended for tests where terminal output needs to be
+// captured. The same writer receives both informational and diagnostic
+// messages; tests that need stream separation call SetStderr to redirect.
+func NewWithWriter(terminal io.Writer, logPath string, useColor bool, verbosity Verbosity) (*Logger, error) {
 	f, err := os.Create(logPath)
 	if err != nil {
 		return nil, fmt.Errorf("creating log file %s: %w", logPath, err)
 	}
-	return &Logger{terminal: terminal, stderr: terminal, file: f, useColor: useColor}, nil
+	return &Logger{
+		terminal:  terminal,
+		stderr:    terminal,
+		file:      f,
+		useColor:  useColor,
+		verbosity: verbosity,
+	}, nil
 }
 
 // SetStderr overrides the writer used for Warn and Error output. Tests that
@@ -98,13 +116,7 @@ func (l *Logger) LogPath() string {
 	return l.file.Name()
 }
 
-// SetVerbosity changes the terminal verbosity level. File output is unaffected:
-// every message type always lands in the log file at full detail.
-func (l *Logger) SetVerbosity(v Verbosity) {
-	l.verbosity = v
-}
-
-// Verbosity returns the current terminal verbosity level.
+// Verbosity returns the terminal verbosity level set at construction.
 func (l *Logger) Verbosity() Verbosity {
 	return l.verbosity
 }
@@ -176,6 +188,14 @@ func (l *Logger) FileInfo(msg string) {
 	l.filef("[INFO] %s", msg)
 }
 
+// FileWarn writes a warning message to the log file only. Used by the
+// runner in interactive mode where a live spinner owns the stdout TTY;
+// writing to stderr would still visually interleave with the spinner since
+// both streams share a terminal.
+func (l *Logger) FileWarn(msg string) {
+	l.filef("[WARN] %s", msg)
+}
+
 // FileError writes an error message to the log file only.
 func (l *Logger) FileError(msg string) {
 	l.filef("[ERROR] %s", msg)
@@ -211,8 +231,8 @@ func (l *Logger) filef(format string, args ...any) {
 	_, _ = fmt.Fprintf(l.file, "[%s] %s\n", ts, fmt.Sprintf(format, args...))
 }
 
-// logFilePattern matches the timestamped log filenames produced by New.
-// The creation time is encoded in the filename (big-endian date format),
+// logFilePattern matches the shape of timestamped log filenames produced by
+// New. The creation time is encoded in the filename in big-endian date format,
 // which makes lexicographic sort equivalent to chronological sort.
 var logFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{6})\.log$`)
 
@@ -220,17 +240,20 @@ var logFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{6})\.log$`)
 const logFilenameLayout = "2006-01-02_150405"
 
 // PruneOldLogs deletes log files under logDir whose embedded timestamp is
-// older than maxAgeDays relative to now. Only files matching the shuttle
+// older than maxAgeDays relative to asOf. Only files matching the shuttle
 // log-filename pattern (YYYY-MM-DD_HHMMSS.log) are considered; any other
-// files in the directory are ignored.
+// files in the directory are ignored. Timestamps are parsed in the local
+// timezone to match the zone New uses when writing the filename, so
+// retention windows behave consistently for non-UTC users.
 //
 // Pruning is best-effort per file: an individual deletion failure is
 // recorded as a warning and the function continues with the rest.
-// A non-nil err is returned only when the directory itself cannot be read.
+// A non-nil err is returned only when the directory itself cannot be read
+// (a missing directory is treated as "nothing to prune").
 //
 // A maxAgeDays value of zero or negative disables pruning and returns
 // (0, nil, nil) without touching the filesystem.
-func PruneOldLogs(logDir string, maxAgeDays int, now time.Time) (deleted int, warnings []string, err error) {
+func PruneOldLogs(logDir string, maxAgeDays int, asOf time.Time) (deleted int, warnings []string, err error) {
 	if maxAgeDays <= 0 {
 		return 0, nil, nil
 	}
@@ -245,7 +268,7 @@ func PruneOldLogs(logDir string, maxAgeDays int, now time.Time) (deleted int, wa
 		return 0, nil, fmt.Errorf("reading log dir %s: %w", logDir, err)
 	}
 
-	cutoff := now.Add(-time.Duration(maxAgeDays) * 24 * time.Hour)
+	cutoff := asOf.Add(-time.Duration(maxAgeDays*hoursPerDay) * time.Hour)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -254,9 +277,14 @@ func PruneOldLogs(logDir string, maxAgeDays int, now time.Time) (deleted int, wa
 		if m == nil {
 			continue
 		}
-		ts, parseErr := time.Parse(logFilenameLayout, m[1])
+		// ParseInLocation matches the zone used by New when the filename was
+		// written (time.Now() produces local time). Using time.Parse would
+		// silently reinterpret the timestamp as UTC and shift the retention
+		// boundary by the caller's UTC offset.
+		ts, parseErr := time.ParseInLocation(logFilenameLayout, m[1], time.Local)
 		if parseErr != nil {
-			// The regex guarantees a parseable shape, but be defensive.
+			// The regex validates shape only, not calendar correctness
+			// (e.g. month 13 or day 45). time.Parse rejects those; skip.
 			continue
 		}
 		if !ts.Before(cutoff) {
