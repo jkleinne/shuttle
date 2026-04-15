@@ -1,6 +1,17 @@
-# Shuttle
+# shuttle
 
 Backup and sync CLI that orchestrates [rsync](https://rsync.samba.org/) and [rclone](https://rclone.org/) through a single TOML config file. Define your local sync jobs and cloud uploads in one place, run them with one command, and get a summary of what happened.
+
+`shuttle` is an orchestrator, not a backup format. It doesn't wrap your data in a repository, snapshot store, or proprietary layout. Whatever rsync and rclone write to the destination is what you get, and restores don't require `shuttle`.
+
+If you already use rsync or rclone and find yourself wrapping them in shell scripts or crontab entries, `shuttle` replaces that with:
+
+- One TOML describing both local (rsync) and cloud (rclone) jobs, run by one command.
+- Partial-failure resilience: a broken source logs and continues instead of aborting the run.
+- Archive-on-delete for rclone `sync` (timestamped `backup_path` with retention) without scripting it yourself.
+- A single end-of-run summary instead of scrollback from two tools.
+
+For encrypted, deduplicated, snapshot-based backups, see [restic](https://restic.net/) or [BorgBackup](https://www.borgbackup.org/). For continuous two-way sync, see [Syncthing](https://syncthing.net/).
 
 ## Features
 
@@ -211,15 +222,15 @@ backup_retention_days = 365
 
 Logs are written to `${XDG_STATE_HOME:-~/.local/state}/shuttle/logs/`. Each run creates a timestamped log file. The path is printed at the end of every run.
 
-At startup Shuttle prunes log files older than `log_retention_days` (default 30) so the directory does not grow unbounded under regular cron use. Pruning is best-effort: a failure on any individual file is recorded as a warning and does not block the backup.
+At startup `shuttle` prunes log files older than `log_retention_days` (default 30) so the directory does not grow unbounded under regular cron use. Pruning is best-effort: a failure on any individual file is recorded as a warning and does not block the backup.
 
 ## Encrypted Rclone Remotes
 
-If your rclone config is encrypted, Shuttle prompts for the password on interactive terminals. For unattended runs (cron, launchd), set `RCLONE_CONFIG_PASS` in the environment.
+If your rclone config is encrypted, `shuttle` prompts for the password on interactive terminals. For unattended runs (cron, launchd), set `RCLONE_CONFIG_PASS` in the environment.
 
 ## Platform Support
 
-Shuttle runs on **macOS** and **Linux**. Windows is not supported (the locking mechanism uses Unix `flock`).
+`shuttle` runs on **macOS** and **Linux**. Windows is not supported (the locking mechanism uses Unix `flock`).
 
 The example config uses generic Unix paths. macOS users may want to add `"--exclude=.DS_Store"` to their `[defaults.rsync]` flags.
 
