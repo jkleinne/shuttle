@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -166,6 +167,12 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 
 	logDir := logDirectory()
 	useColor := term.IsTerminal(int(os.Stdout.Fd()))
+
+	// Prune stale logs before opening a new one so the new file doesn't
+	// count against the retention window. Failures here are operational
+	// metadata issues, never a reason to block a backup run.
+	pruneDeleted, pruneWarnings, pruneErr := log.PruneOldLogs(logDir, cfg.ResolvedLogRetentionDays(), time.Now())
+
 	logger, logPath, err := log.New(logDir, useColor)
 	if err != nil {
 		return fmt.Errorf("setting up logging: %w", err)
@@ -175,6 +182,15 @@ func executeRun(ctx context.Context, skip, only, remotes []string, opts engine.R
 	logger.Header("Shuttle Started")
 	if opts.DryRun {
 		logger.Warn("DRY RUN: no files will be modified.")
+	}
+	if pruneErr != nil {
+		logger.Warn(fmt.Sprintf("log rotation skipped: %v", pruneErr))
+	}
+	for _, w := range pruneWarnings {
+		logger.Warn("log rotation: " + w)
+	}
+	if pruneDeleted > 0 {
+		logger.Info(fmt.Sprintf("pruned %d old log file(s)", pruneDeleted))
 	}
 
 	promptForPassword(logger)

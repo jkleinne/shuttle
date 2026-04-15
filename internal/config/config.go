@@ -27,6 +27,11 @@ const (
 	ModeSync = "sync"
 )
 
+// DefaultLogRetentionDays is applied when [defaults].log_retention_days
+// is absent from the config. An explicit 0 disables pruning; negative
+// values are rejected during validation.
+const DefaultLogRetentionDays = 30
+
 // Config is the top-level configuration for shuttle.
 type Config struct {
 	Defaults *Defaults `toml:"defaults"`
@@ -35,9 +40,15 @@ type Config struct {
 
 // Defaults holds baseline configuration for each engine.
 // Per-job fields override these values.
+//
+// LogRetentionDays controls how long rotated log files are kept under
+// the shuttle log directory, in days. A nil value means "use the
+// package default" (DefaultLogRetentionDays). An explicit 0 disables
+// pruning entirely. Negative values are rejected during validation.
 type Defaults struct {
-	Rsync  *RsyncDefaults  `toml:"rsync"`
-	Rclone *RcloneDefaults `toml:"rclone"`
+	Rsync            *RsyncDefaults  `toml:"rsync"`
+	Rclone           *RcloneDefaults `toml:"rclone"`
+	LogRetentionDays *int            `toml:"log_retention_days"`
 }
 
 // RsyncDefaults holds default flags for all rsync jobs.
@@ -140,6 +151,17 @@ func Load() (*Config, error) {
 	return LoadFile(path)
 }
 
+// ResolvedLogRetentionDays returns the effective log retention in days.
+// Returns DefaultLogRetentionDays when no [defaults].log_retention_days
+// key was provided. An explicit 0 in config means "do not prune" and is
+// returned as 0. Callers treat <= 0 as "pruning disabled".
+func (c *Config) ResolvedLogRetentionDays() int {
+	if c.Defaults == nil || c.Defaults.LogRetentionDays == nil {
+		return DefaultLogRetentionDays
+	}
+	return *c.Defaults.LogRetentionDays
+}
+
 // JobNames returns the names of all configured jobs in config order.
 func (c *Config) JobNames() []string {
 	names := make([]string, len(c.Jobs))
@@ -238,6 +260,9 @@ func (c *Config) expandPaths() error {
 // validate enforces all structural constraints on the parsed config.
 // It returns the first violation encountered, with enough context to act on it.
 func (c *Config) validate() error {
+	if c.Defaults != nil && c.Defaults.LogRetentionDays != nil && *c.Defaults.LogRetentionDays < 0 {
+		return fmt.Errorf("log_retention_days must be >= 0 (got %d); 0 disables pruning", *c.Defaults.LogRetentionDays)
+	}
 	seen := make(map[string]bool, len(c.Jobs))
 	for _, job := range c.Jobs {
 		if job.Name == "" {

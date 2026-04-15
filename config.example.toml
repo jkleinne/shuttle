@@ -6,6 +6,12 @@
 # for stats capture. All other flags come from these defaults or per-job
 # extra_flags. Per-job fields override defaults via last-flag-wins.
 
+[defaults]
+# Age in days after which per-run log files under the shuttle log
+# directory are pruned on startup. Default is 30 when unset. Set to 0
+# to disable pruning entirely; negative values are rejected.
+# log_retention_days = 30
+
 [defaults.rsync]
 flags = ["-a", "-v", "-h", "-P", "-u"]
 # macOS users: add "--exclude=.DS_Store" to skip Finder metadata files

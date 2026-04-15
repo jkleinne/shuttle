@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -140,6 +141,62 @@ func (l *Logger) filef(format string, args ...any) {
 	}
 	ts := time.Now().Format("2006-01-02 15:04:05")
 	_, _ = fmt.Fprintf(l.file, "[%s] %s\n", ts, fmt.Sprintf(format, args...))
+}
+
+// logFilePattern matches the timestamped log filenames produced by New.
+// The creation time is encoded in the filename (big-endian date format),
+// which makes lexicographic sort equivalent to chronological sort.
+var logFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{6})\.log$`)
+
+// logFilenameLayout mirrors the format used by New when creating a log file.
+const logFilenameLayout = "2006-01-02_150405"
+
+// PruneOldLogs deletes log files under logDir whose embedded timestamp is
+// older than maxAgeDays relative to now. Only files matching the shuttle
+// log-filename pattern (YYYY-MM-DD_HHMMSS.log) are considered; any other
+// files in the directory are ignored.
+//
+// Pruning is best-effort per file: an individual deletion failure is
+// recorded as a warning and the function continues with the rest.
+// A non-nil err is returned only when the directory itself cannot be read.
+//
+// A maxAgeDays value of zero or negative disables pruning and returns
+// (0, nil, nil) without touching the filesystem.
+func PruneOldLogs(logDir string, maxAgeDays int, now time.Time) (deleted int, warnings []string, err error) {
+	if maxAgeDays <= 0 {
+		return 0, nil, nil
+	}
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return 0, nil, fmt.Errorf("reading log dir %s: %w", logDir, err)
+	}
+
+	cutoff := now.Add(-time.Duration(maxAgeDays) * 24 * time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		m := logFilePattern.FindStringSubmatch(entry.Name())
+		if m == nil {
+			continue
+		}
+		ts, parseErr := time.Parse(logFilenameLayout, m[1])
+		if parseErr != nil {
+			// The regex guarantees a parseable shape, but be defensive.
+			continue
+		}
+		if !ts.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(logDir, entry.Name())
+		if rmErr := os.Remove(path); rmErr != nil {
+			warnings = append(warnings, fmt.Sprintf("deleting %s: %v", path, rmErr))
+			continue
+		}
+		deleted++
+	}
+	return deleted, warnings, nil
 }
 
 // stripAnsi removes ANSI escape sequences (e.g. "\033[31m") from s.
