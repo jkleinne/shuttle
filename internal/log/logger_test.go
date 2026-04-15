@@ -270,47 +270,31 @@ func TestPruneOldLogs_BoundaryAtRetentionEdge(t *testing.T) {
 	}
 }
 
-// TestPruneOldLogs_NonUTCZone_RespectsFilenameLocalTime asserts that a log
-// filename written in a non-UTC local zone is interpreted in the same zone
-// when PruneOldLogs parses it. Before the fix, time.Parse defaulted to UTC
-// and shifted retention boundaries by the caller's UTC offset, causing
-// up-to-24h skew for anyone outside UTC.
-func TestPruneOldLogs_NonUTCZone_RespectsFilenameLocalTime(t *testing.T) {
+// TestPruneOldLogs_NonUTCZone_RespectsAsOfZone asserts that a log
+// filename is interpreted in the same zone the caller passes via asOf.
+// Before the fix, parsing defaulted to UTC and shifted retention boundaries
+// by the caller's UTC offset, causing up-to-24h skew for anyone outside UTC.
+func TestPruneOldLogs_NonUTCZone_RespectsAsOfZone(t *testing.T) {
 	dir := t.TempDir()
-	// Pick a fixed non-UTC zone for the test. -08:00 matches the Pacific
-	// winter offset; any non-zero offset would work.
 	loc := time.FixedZone("test", -8*60*60)
 
-	// "Now" is exactly 2026-04-15 12:00:00 in the test zone.
 	asOf := time.Date(2026, 4, 15, 12, 0, 0, 0, loc)
 
-	// Imagine a log created 29 days + 23h ago in the test zone. Under the
-	// buggy code path, time.Parse would interpret the filename as UTC, making
-	// the file appear older than retention and get pruned. After the fix, it
-	// should be kept.
+	// 29d23h ago in the same zone: must survive a 30-day retention. Under
+	// UTC-default parsing, the filename would be read 8h earlier than it
+	// was written, pushing it past the 30-day boundary.
 	writeTime := asOf.Add(-29*24*time.Hour - 23*time.Hour)
 	name := writeTime.Format("2006-01-02_150405") + ".log"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", name, err)
 	}
 
-	// The pruner uses time.Local to parse, so override it for this test. Go
-	// doesn't expose an API to set time.Local per-goroutine, but the local
-	// time here is the machine's default. To keep the test independent of
-	// the host zone, we assert behavior relative to time.Local so the
-	// filename we just wrote is interpreted the same way. We also verify
-	// the boundary math using Parse-in-Location indirectly: the file must
-	// survive a 30-day retention.
-	deleted, _, err := log.PruneOldLogs(dir, 30, time.Now().In(time.Local))
+	deleted, _, err := log.PruneOldLogs(dir, 30, asOf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// The file was written with a very-recent local time (format of Now minus
-	// a small delta would not even approach 30 days), so it must survive.
-	// The stronger assertion is simply that a just-written file is never
-	// deleted at retention=30.
 	if deleted != 0 {
-		t.Errorf("recent file should not be pruned, deleted = %d", deleted)
+		t.Errorf("file aged 29d23h should not be pruned, deleted = %d", deleted)
 	}
 	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 		t.Errorf("file should still exist: %v", err)

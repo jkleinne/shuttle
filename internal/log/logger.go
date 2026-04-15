@@ -242,9 +242,10 @@ const logFilenameLayout = "2006-01-02_150405"
 // PruneOldLogs deletes log files under logDir whose embedded timestamp is
 // older than maxAgeDays relative to asOf. Only files matching the shuttle
 // log-filename pattern (YYYY-MM-DD_HHMMSS.log) are considered; any other
-// files in the directory are ignored. Timestamps are parsed in the local
-// timezone to match the zone New uses when writing the filename, so
-// retention windows behave consistently for non-UTC users.
+// files in the directory are ignored. Timestamps are parsed in asOf's
+// zone; callers pass time.Now() so the parse zone matches the zone New
+// used when stamping the filename, keeping retention consistent for
+// non-UTC users.
 //
 // Pruning is best-effort per file: an individual deletion failure is
 // recorded as a warning and the function continues with the rest.
@@ -277,11 +278,10 @@ func PruneOldLogs(logDir string, maxAgeDays int, asOf time.Time) (deleted int, w
 		if m == nil {
 			continue
 		}
-		// ParseInLocation matches the zone used by New when the filename was
-		// written (time.Now() produces local time). Using time.Parse would
-		// silently reinterpret the timestamp as UTC and shift the retention
-		// boundary by the caller's UTC offset.
-		ts, parseErr := time.ParseInLocation(logFilenameLayout, m[1], time.Local)
+		// Parse in the caller's zone (carried by asOf). New() stamps
+		// filenames from time.Now(), so callers pass time.Now() as asOf
+		// and the zones line up without reading a package global.
+		ts, parseErr := time.ParseInLocation(logFilenameLayout, m[1], asOf.Location())
 		if parseErr != nil {
 			// The regex validates shape only, not calendar correctness
 			// (e.g. month 13 or day 45). time.Parse rejects those; skip.

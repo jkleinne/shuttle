@@ -2,20 +2,44 @@ version: "2"
 
 linters:
   default: none
+
   enable:
+    # Baseline linters
     - errcheck
-    - gocyclo
     - govet
     - ineffassign
-    - mnd
-    - nestif
     - staticcheck
     - unused
+
+    # Complexity bounds
+    - gocyclo
+    - nestif
+
+    # Magic numbers and strings
+    - mnd
+    - goconst
+
+    # Function shape
+    - funlen
+    - revive
+
+    # Idiomatic stdlib use
+    - perfsprint
+    - usestdlibvars
+
+    # Error handling
+    - errorlint
+
+    # Style and correctness
+    - gocritic
+
   settings:
     gocyclo:
       min-complexity: 15
+
     nestif:
       min-complexity: 4
+
     mnd:
       ignored-functions:
         - make
@@ -31,13 +55,59 @@ linters:
         - "1"
         - "2"
         - "3"
-        - "10"
-        - "100"
-        - "1000"
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+      match-constant: false
+      numbers: false
+
+    funlen:
+      lines: 60
+      statements: 40
+      ignore-comments: true
+
+    revive:
+      rules:
+        - name: flag-parameter
+        - name: argument-limit
+          arguments:
+            - 5
+        - name: early-return
+        - name: unused-parameter
+        - name: confusing-naming
+        - name: unexported-return
+        - name: error-return
+        - name: error-strings
+        - name: var-naming
+
+    gocritic:
+      enabled-checks:
+        - commentedOutCode
+        - appendCombine
+      disabled-checks:
+        - exitAfterDefer
+        - singleCaseSwitch
+
+    perfsprint:
+      err-error: true
+      errorf: true
+      int-conversion: true
+      sprintf1: true
+      strconcat: true
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
   exclusions:
     rules:
-      # Table-driven tests inflate cyclomatic complexity without indicating
-      # genuine complexity. Exclude test files from gocyclo only.
       - path: _test\.go
         linters:
           - gocyclo
+          - funlen
+          - goconst
+          - mnd
+          - nestif
+          - revive

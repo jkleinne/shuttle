@@ -31,16 +31,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history needed so --new-from-merge-base can resolve origin/main.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v7.0.1
+        with:
+          # Only flag issues introduced by the current branch. Existing
+          # violations are treated as baselined debt.
+          args: --new-from-merge-base=origin/main
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0
 
       - name: Run govulncheck
         run: govulncheck ./...
