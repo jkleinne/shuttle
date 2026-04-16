@@ -18,11 +18,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
-      # Linux arm64 is intentionally excluded; macOS arm64 + amd64 and Linux
-      # amd64 are the supported targets.
-      - goos: linux
-        goarch: arm64
     flags:
       - -trimpath
     ldflags:
