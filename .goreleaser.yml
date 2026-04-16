@@ -98,7 +98,7 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/jkleinne/shuttle"
-    description: "Personal backup and synchronization CLI orchestrating rsync and rclone via a single TOML config"
+    description: "Personal backup and sync CLI for rsync and rclone via TOML config"
     license: "MIT"
     commit_author:
       name: goreleaserbot
