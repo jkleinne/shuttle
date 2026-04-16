@@ -93,6 +93,7 @@ go build -ldflags "-X main.version=1.0.0" -o shuttle ./cmd/shuttle
 ```
 shuttle [flags]          Run the sync pipeline (same as `shuttle run`)
 shuttle run [flags]      Run the sync pipeline
+shuttle validate         Parse the config file and report errors
 shuttle version          Print version
 ```
 
@@ -100,6 +101,7 @@ shuttle version          Print version
 
 | Flag | Short | Description |
 |------|-------|-------------|
+| `--config <path>` | `-c` | Use this config file instead of the default XDG location. Tilde and relative paths are resolved. Also available via `$SHUTTLE_CONFIG`; the flag takes precedence. An explicit path must exist (unlike the default XDG path, which may be absent). |
 | `--dry-run` | `-n` | Preview changes without modifying files |
 | `--skip <name>` | | Skip a job by name (repeatable, mutually exclusive with `--only`) |
 | `--only <name>` | | Run only the named job(s) (repeatable, mutually exclusive with `--skip`) |
@@ -123,7 +125,7 @@ Informational output (banners, progress, per-job status, the final summary) goes
 
 ## Configuration
 
-Config lives at `${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml`. See [`config.example.toml`](config.example.toml) for a complete annotated example.
+Config lives at `${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml` by default. Override with `--config <path>` or `SHUTTLE_CONFIG=<path>` for alternate configs (per-host, CI, multiple profiles). See [`config.example.toml`](config.example.toml) for a complete annotated example.
 
 ### Defaults
 
