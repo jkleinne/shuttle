@@ -505,6 +505,273 @@ destination = %q
 	}
 }
 
+// writeConfigTo writes the given TOML to an explicit path (not the XDG
+// default) and returns a minimal env slice. No XDG_CONFIG_HOME is set, so the
+// child process can only find the config via --config or $SHUTTLE_CONFIG.
+func writeConfigTo(t *testing.T, path, toml string) []string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating parent dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(toml), 0o644); err != nil {
+		t.Fatalf("writing config file: %v", err)
+	}
+	stateDir := filepath.Join(t.TempDir(), "xdg-state")
+	return []string{
+		"XDG_STATE_HOME=" + stateDir,
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+}
+
+// rsyncJobTOML builds a minimal valid rsync job config for --config tests.
+func rsyncJobTOML(t *testing.T, src, dst string) string {
+	t.Helper()
+	return fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "explicit-config"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, src, dst)
+}
+
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+		{"~", home},
+		{"~/config.toml", filepath.Join(home, "config.toml")},
+		{"~/nested/dir/file", filepath.Join(home, "nested/dir/file")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := expandHome(tc.in)
+			if err != nil {
+				t.Fatalf("expandHome(%q) returned error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCLI_ConfigFlag_ValidPath_Succeeds(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "alt-config.toml")
+	env := writeConfigTo(t, configPath, rsyncJobTOML(t, src, dst))
+
+	result := runShuttle(t, env, "--config", configPath)
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_ConfigFlag_MissingPath_UsageError(t *testing.T) {
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	missing := filepath.Join(t.TempDir(), "nope.toml")
+	result := runShuttle(t, env, "--config", missing)
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, missing) {
+		t.Errorf("stderr should mention the path %q, got: %q", missing, result.stderr)
+	}
+}
+
+func TestCLI_ConfigFlag_TildeExpansion_Succeeds(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	home := t.TempDir()
+	src := filepath.Join(home, "src")
+	dst := filepath.Join(home, "dst")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "my-config.toml")
+	if err := os.WriteFile(configPath, []byte(rsyncJobTOML(t, src, dst)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{
+		"HOME=" + home,
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	// The child expands ~ against its own HOME, which points at the temp dir
+	// holding the config file.
+	result := runShuttle(t, env, "--config", "~/my-config.toml", "validate")
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stdout, configPath) {
+		t.Errorf("stdout should contain expanded path %q, got: %q", configPath, result.stdout)
+	}
+}
+
+func TestCLI_ConfigFlag_RelativePath_ResolvedFromCWD(t *testing.T) {
+	// Run from a subdirectory with a relative path. The resolver must absolve
+	// the path against cwd so the lock hash stays stable and the validate
+	// output prints an absolute path.
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "rel.toml")
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(configPath, []byte(rsyncJobTOML(t, src, dst)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a subdir to run from; relative path "../rel.toml" should resolve
+	// back up to configPath.
+	sub := filepath.Join(configDir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"HOME=" + t.TempDir(),
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	cmd := exec.Command(shuttleBin, "--config", "../rel.toml", "validate")
+	cmd.Env = env
+	cmd.Dir = sub
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("exit error: %v; stderr: %s", err, errBuf.String())
+	}
+	// The printed path should be absolute and equal to configPath.
+	if !strings.Contains(out.String(), configPath) {
+		t.Errorf("stdout should contain absolute path %q, got: %q", configPath, out.String())
+	}
+	if strings.Contains(out.String(), "../rel.toml") {
+		t.Errorf("stdout should not contain the relative input, got: %q", out.String())
+	}
+}
+
+func TestCLI_ConfigEnv_ValidPath_Succeeds(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "env-config.toml")
+	env := writeConfigTo(t, configPath, rsyncJobTOML(t, src, dst))
+	env = append(env, "SHUTTLE_CONFIG="+configPath)
+
+	result := runShuttle(t, env)
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_ConfigEnv_MissingPath_UsageError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.toml")
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+		"SHUTTLE_CONFIG=" + missing,
+	}
+	result := runShuttle(t, env, "validate")
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, missing) {
+		t.Errorf("stderr should mention the path %q, got: %q", missing, result.stderr)
+	}
+}
+
+func TestCLI_ConfigFlag_OverridesEnv(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The env var points to a missing file; the flag points to a valid one.
+	// If precedence works, the run succeeds. If the env wins, it fails with exit 2.
+	good := filepath.Join(t.TempDir(), "good.toml")
+	if err := os.WriteFile(good, []byte(rsyncJobTOML(t, src, dst)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(t.TempDir(), "nope.toml")
+
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+		"SHUTTLE_CONFIG=" + bad,
+	}
+	result := runShuttle(t, env, "--config", good)
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (flag should override env); stderr: %s",
+			result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_Validate_ConfigFlag_ValidPath_PrintsResolvedPath(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "validate-me.toml")
+	env := writeConfigTo(t, configPath, rsyncJobTOML(t, src, dst))
+
+	result := runShuttle(t, env, "validate", "--config", configPath)
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stdout, "config ok") {
+		t.Errorf("stdout should contain 'config ok', got: %q", result.stdout)
+	}
+	if !strings.Contains(result.stdout, configPath) {
+		t.Errorf("stdout should contain resolved path %q, got: %q", configPath, result.stdout)
+	}
+}
+
+func TestCLI_Validate_ConfigFlag_MissingPath_UsageError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+	result := runShuttle(t, env, "validate", "--config", missing)
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
 func TestCLI_MissingSource_PartialFailure(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")

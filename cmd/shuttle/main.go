@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ type cliFlags struct {
 	ColorMode       string
 	Quiet           bool
 	Verbose         bool
+	ConfigPath      string
 }
 
 // run is the real entry point, returning an exit code so main stays testable.
@@ -95,7 +97,7 @@ func run() int {
 		Use:   "validate",
 		Short: "Check configuration file for errors",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path, err := config.ConfigPath()
+			path, _, err := resolveConfigPath(cli.ConfigPath)
 			if err != nil {
 				return err
 			}
@@ -120,6 +122,11 @@ func run() int {
 		cmd.Flags().BoolVarP(&cli.Quiet, "quiet", "q", false, "Suppress terminal output on success (mutually exclusive with --verbose)")
 		cmd.Flags().BoolVarP(&cli.Verbose, "verbose", "v", false, "Show executed commands and extra diagnostics (mutually exclusive with --quiet)")
 	}
+
+	// --config is a persistent flag on the root so both `run` and `validate`
+	// inherit it without duplicating the declaration.
+	rootCmd.PersistentFlags().StringVarP(&cli.ConfigPath, "config", "c", "",
+		"Path to config file (overrides $SHUTTLE_CONFIG and the default XDG location)")
 
 	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
 
@@ -169,6 +176,11 @@ const (
 	colorNever  = "never"
 )
 
+// envConfigPath names the environment variable used to supply an alternate
+// config path when --config is not set. Matches the pattern established by
+// rclone (RCLONE_CONFIG), kubectl (KUBECONFIG), and docker (DOCKER_CONFIG).
+const envConfigPath = "SHUTTLE_CONFIG"
+
 // validateColorMode returns an error when mode is not one of the supported
 // --color values. Matching is case-sensitive so "AUTO" is rejected, matching
 // the behavior of git, ripgrep, and ls.
@@ -194,6 +206,50 @@ func resolveVerbosity(quiet, verbose bool) log.Verbosity {
 	default:
 		return log.VerbosityNormal
 	}
+}
+
+// resolveConfigPath picks the config path to use and reports whether the
+// caller supplied one explicitly (via --config or $SHUTTLE_CONFIG). An
+// explicit path is asserted-to-exist by the caller; the default XDG path is
+// tolerated as absent. Tildes are expanded and paths are made absolute so the
+// lock-file hash is stable regardless of the caller's working directory.
+func resolveConfigPath(flagValue string) (path string, explicit bool, err error) {
+	raw := flagValue
+	if raw == "" {
+		raw = os.Getenv(envConfigPath)
+	}
+	if raw == "" {
+		p, pathErr := config.ConfigPath()
+		if pathErr != nil {
+			return "", false, pathErr
+		}
+		return p, false, nil
+	}
+	expanded, expErr := expandHome(raw)
+	if expErr != nil {
+		return "", true, expErr
+	}
+	abs, absErr := filepath.Abs(expanded)
+	if absErr != nil {
+		return "", true, fmt.Errorf("resolving config path %q: %w", raw, absErr)
+	}
+	return abs, true, nil
+}
+
+// expandHome replaces a leading "~" with the user's home directory. Paths
+// that do not start with "~" are returned unchanged. Kept local to main.go
+// because tilde expansion of CLI inputs is a shell/boundary concern; the
+// equivalent helper inside internal/config handles tildes in *config values*,
+// which is a separate use case.
+func expandHome(path string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory for path %q: %w", path, err)
+	}
+	return filepath.Join(home, path[1:]), nil
 }
 
 // resolveColor decides whether ANSI color output should be enabled based on
@@ -228,7 +284,19 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 	opts.SelectedRemotes = cli.SelectedRemotes
 	verbosity := resolveVerbosity(cli.Quiet, cli.Verbose)
 
-	cfg, err := config.Load()
+	configPath, explicit, err := resolveConfigPath(cli.ConfigPath)
+	if err != nil {
+		return err
+	}
+
+	// An explicit path (flag or env) must exist; a missing default XDG path
+	// is tolerated and yields an empty Config{} so first-run UX still works.
+	var cfg *config.Config
+	if explicit {
+		cfg, err = config.LoadFile(configPath)
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
@@ -238,11 +306,6 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 	}
 
 	if err := validateRemoteNames(opts.SelectedRemotes, cfg.AllRemoteNames()); err != nil {
-		return err
-	}
-
-	configPath, err := config.ConfigPath()
-	if err != nil {
 		return err
 	}
 
