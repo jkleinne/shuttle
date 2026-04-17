@@ -653,3 +653,124 @@ func TestRenderSummary_WithColor(t *testing.T) {
 		t.Error("header should use bold blue")
 	}
 }
+
+func TestStatusSymbol_OptionalMissing_PlainText(t *testing.T) {
+	got := statusSymbol(StatusOptionalMissing, false)
+	if got != "○" {
+		t.Errorf("statusSymbol(StatusOptionalMissing, false) = %q, want \"○\"", got)
+	}
+}
+
+func TestItemStatsText_OptionalMissing_PlainText(t *testing.T) {
+	item := ItemResult{Status: StatusOptionalMissing}
+	got := itemStatsText(item, false)
+	if got != "source missing (optional)" {
+		t.Errorf("itemStatsText = %q, want \"source missing (optional)\"", got)
+	}
+}
+
+func TestJobStatus_AllOptionalMissing(t *testing.T) {
+	job := JobResult{
+		Name: "koreader",
+		Items: []ItemResult{
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusOptionalMissing {
+		t.Errorf("jobStatus = %q, want %q", got, StatusOptionalMissing)
+	}
+}
+
+func TestJobStatus_MixedOKAndOptionalMissing_IsOK(t *testing.T) {
+	// Multi-source rsync: one source present and synced, one absent.
+	// The job is not a failure; the tally counts it as passed.
+	job := JobResult{
+		Name: "photos",
+		Items: []ItemResult{
+			{Status: StatusOK},
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusOK {
+		t.Errorf("jobStatus = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestJobStatus_FailedWinsOverOptionalMissing(t *testing.T) {
+	job := JobResult{
+		Name: "photos",
+		Items: []ItemResult{
+			{Status: StatusFailed},
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusFailed {
+		t.Errorf("jobStatus = %q, want %q", got, StatusFailed)
+	}
+}
+
+func TestCanCollapseGroup_AllOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if !canCollapseGroup(group) {
+		t.Error("canCollapseGroup = false, want true for all-optional-missing group")
+	}
+}
+
+func TestFormatTally_IncludesOptionalSegment(t *testing.T) {
+	got := formatTally(5, 1, 2, 30*time.Second, false)
+	if !strings.Contains(got, "5 passed") {
+		t.Errorf("missing '5 passed' in %q", got)
+	}
+	if !strings.Contains(got, "1 optional") {
+		t.Errorf("missing '1 optional' in %q", got)
+	}
+	if !strings.Contains(got, "2 failed") {
+		t.Errorf("missing '2 failed' in %q", got)
+	}
+}
+
+func TestFormatTally_OmitsOptionalWhenZero(t *testing.T) {
+	got := formatTally(5, 0, 0, 10*time.Second, false)
+	if strings.Contains(got, "optional") {
+		t.Errorf("unexpected 'optional' segment in %q", got)
+	}
+}
+
+func TestRenderSummary_OptionalMissingRclone_TallyAndSymbol(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "photos", Items: []ItemResult{
+				{Name: "gallery", Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+			}},
+			{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "books", Status: StatusOptionalMissing},
+			}},
+			{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "books", Status: StatusOptionalMissing},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "○") {
+		t.Error("missing optional-missing symbol ○")
+	}
+	if !strings.Contains(out, "source missing (optional)") {
+		t.Error("missing optional-missing text")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Errorf("tally should read '1 passed' (photos), got: %s", out)
+	}
+	if !strings.Contains(out, "1 optional") {
+		t.Errorf("tally should read '1 optional' (koreader group), got: %s", out)
+	}
+	if strings.Contains(out, "failed") {
+		t.Errorf("tally should not include 'failed' segment when no failures, got: %s", out)
+	}
+}

@@ -41,6 +41,8 @@ func statusSymbol(status Status, useColor bool) string {
 		return colorize(useColor, ansiRed, "✗")
 	case StatusSkipped:
 		return colorize(useColor, ansiYellow, "–")
+	case StatusOptionalMissing:
+		return colorize(useColor, ansiDim, "○")
 	default:
 		return colorize(useColor, ansiGreen, "✓")
 	}
@@ -56,27 +58,53 @@ func itemStatsText(item ItemResult, useColor bool) string {
 		return colorize(useColor, ansiRed, "not found")
 	case StatusSkipped:
 		return colorize(useColor, ansiYellow, "skipped")
+	case StatusOptionalMissing:
+		return colorize(useColor, ansiDim, "source missing (optional)")
 	default:
 		return colorize(useColor, ansiDim, formatChecked(item.Stats))
 	}
 }
 
-// jobStatus returns StatusFailed if any item in the job failed or was not found.
+// jobStatus classifies a job into three buckets:
+//   - StatusFailed: any item is StatusFailed or StatusNotFound
+//   - StatusOptionalMissing: every item is StatusOptionalMissing
+//   - StatusOK: everything else (including mixed OK + optional-missing,
+//     e.g., a multi-source rsync job where one source was absent)
+//
+// The returned value selects the job-level symbol via statusSymbol and the
+// tally counter the job increments in RenderSummary.
 func jobStatus(job JobResult) Status {
+	allOptionalMissing := len(job.Items) > 0
 	for _, item := range job.Items {
 		if item.Status == StatusFailed || item.Status == StatusNotFound {
 			return StatusFailed
 		}
+		if item.Status != StatusOptionalMissing {
+			allOptionalMissing = false
+		}
+	}
+	if allOptionalMissing {
+		return StatusOptionalMissing
 	}
 	return StatusOK
 }
 
-// groupStatus returns StatusFailed if any job in the group has failures.
+// groupStatus classifies an rclone group using the same three-bucket rule
+// as jobStatus: any item failed → StatusFailed; every item optional-missing
+// → StatusOptionalMissing; otherwise StatusOK.
 func groupStatus(group []JobResult) Status {
+	allOptionalMissing := len(group) > 0
 	for _, jr := range group {
-		if jobStatus(jr) == StatusFailed {
+		js := jobStatus(jr)
+		if js == StatusFailed {
 			return StatusFailed
 		}
+		if js != StatusOptionalMissing {
+			allOptionalMissing = false
+		}
+	}
+	if allOptionalMissing {
+		return StatusOptionalMissing
 	}
 	return StatusOK
 }
@@ -92,13 +120,32 @@ func collectGroup(jobs []JobResult, start int) []JobResult {
 	return jobs[start:end]
 }
 
-// canCollapseGroup returns true when all remotes in a group have the same
-// FilesChecked count, all succeeded, and none transferred files.
+// canCollapseGroup returns true when a group of rclone results can be
+// rendered as a single collapsed line instead of a tree. Two shapes
+// collapse:
+//
+//  1. All remotes succeeded with the same FilesChecked count and zero
+//     transfers — the uninteresting "everything up to date" case.
+//  2. All remotes are StatusOptionalMissing — the "source not plugged in"
+//     case, which would otherwise repeat the same line per remote.
+//
 // Relies on the JobResult.Items invariant: Items always has at least one element.
 func canCollapseGroup(group []JobResult) bool {
 	if len(group) <= 1 {
 		return false
 	}
+
+	allOptionalMissing := true
+	for _, jr := range group {
+		if jr.Items[0].Status != StatusOptionalMissing {
+			allOptionalMissing = false
+			break
+		}
+	}
+	if allOptionalMissing {
+		return true
+	}
+
 	first := group[0].Items[0]
 	if first.Status != StatusOK || first.Stats.FilesTransferred > 0 {
 		return false
@@ -230,6 +277,13 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 	}
 
 	if canCollapseGroup(group) {
+		// Differentiate the two collapse shapes.
+		if groupStatus(group) == StatusOptionalMissing {
+			label := fmt.Sprintf("%d remotes · source missing (optional)", len(group))
+			_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
+				colorize(useColor, ansiDim, label))
+			return
+		}
 		checked := group[0].Items[0].Stats.FilesChecked
 		elapsed := maxGroupElapsed(group)
 		collapsedStats := TransferStats{FilesChecked: checked, Elapsed: elapsed}
@@ -269,10 +323,13 @@ func renderSkippedJob(w io.Writer, job JobResult, nameWidth int, useColor bool) 
 }
 
 // formatTally builds the colored footer tally line.
-// The failed segment is omitted when zero.
-func formatTally(passed, failed int, d time.Duration, useColor bool) string {
+// The failed and optional segments are omitted when their counts are zero.
+func formatTally(passed, optional, failed int, d time.Duration, useColor bool) string {
 	var parts []string
 	parts = append(parts, colorize(useColor, ansiGreen, fmt.Sprintf("%d passed", passed)))
+	if optional > 0 {
+		parts = append(parts, colorize(useColor, ansiDim, fmt.Sprintf("%d optional", optional)))
+	}
 	if failed > 0 {
 		parts = append(parts, colorize(useColor, ansiRed, fmt.Sprintf("%d failed", failed)))
 	}
@@ -296,7 +353,7 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 	_, _ = fmt.Fprintln(w)
 
 	nameWidth := maxJobNameWidth(s.Jobs)
-	var passed, failed int
+	var passed, optional, failed int
 
 	i := 0
 	for i < len(s.Jobs) {
@@ -311,9 +368,12 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 		if job.Remote != "" {
 			group := collectGroup(s.Jobs, i)
 			renderRcloneGroup(w, group, nameWidth, useColor)
-			if groupStatus(group) == StatusFailed {
+			switch groupStatus(group) {
+			case StatusFailed:
 				failed++
-			} else {
+			case StatusOptionalMissing:
+				optional++
+			default:
 				passed++
 			}
 			i += len(group)
@@ -321,9 +381,12 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 		}
 
 		renderRsyncJob(w, job, nameWidth, useColor)
-		if jobStatus(job) == StatusFailed {
+		switch jobStatus(job) {
+		case StatusFailed:
 			failed++
-		} else {
+		case StatusOptionalMissing:
+			optional++
+		default:
 			passed++
 		}
 		i++
@@ -331,7 +394,7 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
-	_, _ = fmt.Fprintln(w, formatTally(passed, failed, s.Duration, useColor))
+	_, _ = fmt.Fprintln(w, formatTally(passed, optional, failed, s.Duration, useColor))
 
 	if len(s.Errors) > 0 {
 		_, _ = fmt.Fprintln(w)
