@@ -1,10 +1,17 @@
 package engine
 
 import (
+	"bytes"
+	"context"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jkleinne/shuttle/internal/config"
+	"github.com/jkleinne/shuttle/internal/log"
 )
 
 func TestValidateJobNames_ValidNames(t *testing.T) {
@@ -93,5 +100,126 @@ func TestTargetRemotes_SelectionNotInJob(t *testing.T) {
 	got := r.targetRemotes([]string{"gdrive"}, []string{"onedrive"})
 	if len(got) != 0 {
 		t.Errorf("expected empty (no overlap), got %v", got)
+	}
+}
+
+// newTestRunner builds a Runner with nil cfg defaults, a logger writing to
+// the supplied buffer, and a non-interactive ProgressWriter to io.Discard.
+// Suitable for unit-testing the missing-source branches that do not invoke
+// rsync or rclone.
+func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
+	t.Helper()
+	logFile := filepath.Join(t.TempDir(), "test.log")
+	logger, err := log.NewWithWriter(termBuf, logFile, false, log.VerbosityNormal)
+	if err != nil {
+		t.Fatalf("creating logger: %v", err)
+	}
+	pw := NewProgressWriter(io.Discard, false, false)
+	return &Runner{
+		cfg:     &config.Config{},
+		logger:  logger,
+		pw:      pw,
+		rsync:   NewRsyncExecutor(logger),
+		rclone:  NewRcloneExecutor(logger, logFile),
+		logFile: logFile,
+	}
+}
+
+func TestRunRsyncJob_Optional_MissingSource_MarksOptionalMissing(t *testing.T) {
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	job := config.Job{
+		Name:        "koreader",
+		Engine:      config.EngineRsync,
+		Sources:     []string{missing},
+		Destination: t.TempDir(),
+		Optional:    true,
+	}
+
+	result := r.runRsyncJob(context.Background(), job)
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusOptionalMissing {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusOptionalMissing)
+	}
+	if !strings.Contains(termBuf.String(), "optional") {
+		t.Errorf("expected log output to mention 'optional', got: %s", termBuf.String())
+	}
+}
+
+func TestRunRsyncJob_NotOptional_MissingSource_MarksNotFound(t *testing.T) {
+	// Regression: existing non-optional behavior must be preserved.
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	job := config.Job{
+		Name:        "photos",
+		Engine:      config.EngineRsync,
+		Sources:     []string{missing},
+		Destination: t.TempDir(),
+		// Optional defaults to false
+	}
+
+	result := r.runRsyncJob(context.Background(), job)
+
+	if result.Items[0].Status != StatusNotFound {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
+	}
+}
+
+func TestRunRsyncJob_Optional_MultiSource_PresentAndMissing(t *testing.T) {
+	// Pins the per-source granularity claim: with Optional=true, a present
+	// source still syncs normally while a missing source becomes
+	// StatusOptionalMissing. Requires rsync on PATH because the present
+	// source is actually copied through rsync.
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	srcPresent := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcPresent, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("seeding source: %v", err)
+	}
+	srcMissing := filepath.Join(t.TempDir(), "does-not-exist")
+	dest := t.TempDir()
+
+	job := config.Job{
+		Name:        "multi",
+		Engine:      config.EngineRsync,
+		Sources:     []string{srcPresent, srcMissing},
+		Destination: dest,
+		Optional:    true,
+	}
+
+	result := r.runRsyncJob(context.Background(), job)
+
+	if len(result.Items) != 2 {
+		t.Fatalf("Items count = %d, want 2", len(result.Items))
+	}
+
+	var seenOK, seenOptional bool
+	for _, item := range result.Items {
+		switch item.Status {
+		case StatusOK:
+			seenOK = true
+		case StatusOptionalMissing:
+			seenOptional = true
+		default:
+			t.Errorf("unexpected item status %q", item.Status)
+		}
+	}
+	if !seenOK {
+		t.Error("expected one StatusOK item for the present source")
+	}
+	if !seenOptional {
+		t.Error("expected one StatusOptionalMissing item for the absent source")
 	}
 }

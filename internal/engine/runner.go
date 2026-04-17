@@ -234,14 +234,17 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			if multiSource {
 				label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(source))
 			}
-			r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
-			notFound := ItemResult{
-				Name:   filepath.Base(source),
-				Status: StatusNotFound,
+			item := ItemResult{Name: filepath.Base(source)}
+			if job.Optional {
+				r.logWarn(fmt.Sprintf("Source not present (optional, skipping): %s", source))
+				item.Status = StatusOptionalMissing
+			} else {
+				r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
+				item.Status = StatusNotFound
 			}
 			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(notFound)
-			items = append(items, notFound)
+			r.pw.FinishJob(item)
+			items = append(items, item)
 			continue
 		}
 
