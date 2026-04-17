@@ -795,3 +795,34 @@ destination = %q
 			result.exitCode, result.stderr)
 	}
 }
+
+func TestCLI_OptionalMissing_ExitZero(t *testing.T) {
+	if _, err := exec.LookPath("rclone"); err != nil {
+		t.Skip("rclone not found on PATH; test requires rclone for prerequisite check")
+	}
+	// Config declares an rclone job with a non-existent local source and
+	// optional = true. Run should exit 0, summary should show an optional
+	// tally segment, and no "failed" count.
+	missing := filepath.Join(t.TempDir(), "koreader-absent")
+	toml := `
+[[job]]
+name = "koreader-to-cloud"
+engine = "rclone"
+source = "` + missing + `"
+remotes = ["crypt_gdrive"]
+mode = "copy"
+optional = true
+`
+	env := writeConfig(t, toml)
+	res := runShuttle(t, env, "run", "--color=never")
+
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want 0. stderr: %s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "1 optional") {
+		t.Errorf("stdout missing '1 optional' segment:\n%s", res.stdout)
+	}
+	if strings.Contains(res.stdout, "failed") {
+		t.Errorf("stdout should not mention 'failed' when only optional-missing:\n%s", res.stdout)
+	}
+}
