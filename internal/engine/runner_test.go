@@ -105,6 +105,8 @@ func TestTargetRemotes_SelectionNotInJob(t *testing.T) {
 
 // newTestRunner builds a Runner with nil cfg defaults, a logger writing to
 // the supplied buffer, and a non-interactive ProgressWriter to io.Discard.
+// Delegates to NewRunner so any future field added to Runner is initialized
+// by the real constructor rather than silently zero-valued here.
 // Suitable for unit-testing the missing-source branches that do not invoke
 // rsync or rclone.
 func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
@@ -115,14 +117,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 		t.Fatalf("creating logger: %v", err)
 	}
 	pw := NewProgressWriter(io.Discard, false, false)
-	return &Runner{
-		cfg:     &config.Config{},
-		logger:  logger,
-		pw:      pw,
-		rsync:   NewRsyncExecutor(logger),
-		rclone:  NewRcloneExecutor(logger, logFile),
-		logFile: logFile,
-	}
+	return NewRunner(&config.Config{}, "", logger, pw, false, logFile)
 }
 
 func TestRunRsyncJob_Optional_MissingSource_MarksOptionalMissing(t *testing.T) {

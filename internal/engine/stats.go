@@ -30,6 +30,15 @@ const (
 	StatusOptionalMissing Status = "optional_missing"
 )
 
+// IsFailure reports whether a status represents a real failure that should
+// drive a non-zero exit code. The predicate is centralized here so that
+// Summary.HasErrors, collectErrors, jobStatus, and groupStatus all agree
+// on what "failure" means. StatusOptionalMissing is deliberately excluded:
+// it is a user-opted-in outcome for detachable sources, not a failure.
+func (s Status) IsFailure() bool {
+	return s == StatusFailed || s == StatusNotFound
+}
+
 // TransferStats holds the quantitative output of a single rsync or rclone run.
 // String fields (BytesSent, Speed) preserve the tool's own human-readable unit
 // strings rather than converting to raw bytes, since they are only ever
@@ -79,18 +88,15 @@ type Summary struct {
 	DryRun   bool
 }
 
-// HasErrors returns true when at least one item across all jobs has
-// StatusFailed or StatusNotFound. Both statuses represent failure
-// conditions: StatusFailed means the tool ran but the sync failed;
-// StatusNotFound means the source path could not be resolved before the
-// tool was invoked. StatusOptionalMissing is deliberately excluded —
-// it represents a user-opted-in "skip if source absent" outcome and
-// must not trigger a non-zero exit.
+// HasErrors returns true when at least one item across all jobs has a
+// failure status. Delegates to Status.IsFailure so the failure-vs-non-failure
+// rule is defined in exactly one place; see the method's doc comment for
+// the list of statuses that count.
 // Used by the CLI to choose a non-zero exit code after partial failures.
 func (s Summary) HasErrors() bool {
 	for _, job := range s.Jobs {
 		for _, item := range job.Items {
-			if item.Status == StatusFailed || item.Status == StatusNotFound {
+			if item.Status.IsFailure() {
 				return true
 			}
 		}

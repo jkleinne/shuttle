@@ -709,6 +709,38 @@ func TestJobStatus_FailedWinsOverOptionalMissing(t *testing.T) {
 	}
 }
 
+func TestJobStatus_EmptyItems_IsOK(t *testing.T) {
+	// Defensive guard: the JobResult invariant says Items is always
+	// non-empty, but jobStatus must still return a safe bucket if an
+	// empty JobResult ever reaches it. StatusOK is correct ("nothing
+	// happened" is not a failure and is not an explicit optional skip).
+	job := JobResult{Name: "empty"}
+	if got := jobStatus(job); got != StatusOK {
+		t.Errorf("jobStatus(empty) = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestStatus_IsFailure(t *testing.T) {
+	// Pins the single-source-of-truth predicate used by HasErrors,
+	// collectErrors, and aggregateStatus. StatusOptionalMissing must
+	// not register as a failure.
+	cases := []struct {
+		status Status
+		want   bool
+	}{
+		{StatusOK, false},
+		{StatusFailed, true},
+		{StatusNotFound, true},
+		{StatusSkipped, false},
+		{StatusOptionalMissing, false},
+	}
+	for _, tc := range cases {
+		if got := tc.status.IsFailure(); got != tc.want {
+			t.Errorf("Status(%q).IsFailure() = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
 func TestCanCollapseGroup_AllOptionalMissing(t *testing.T) {
 	group := []JobResult{
 		{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusOptionalMissing}}},
