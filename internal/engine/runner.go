@@ -201,13 +201,14 @@ func skippedJobResult(name string) JobResult {
 }
 
 // collectErrors walks all item results and formats "<job>[→remote]/<item>"
-// labels for each failed or missing item. The label format is the same one
-// the summary renderer uses for error lines.
+// labels for each failed item. Delegates to Status.IsFailure so the
+// failure predicate stays in a single place; see that method for the
+// list of statuses that count as failures.
 func collectErrors(jobs []JobResult) []string {
 	var errs []string
 	for _, j := range jobs {
 		for _, item := range j.Items {
-			if item.Status == StatusFailed || item.Status == StatusNotFound {
+			if item.Status.IsFailure() {
 				errs = append(errs, fmt.Sprintf("%s/%s", jobLabel(j.Name, j.Remote), item.Name))
 			}
 		}
@@ -234,14 +235,17 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			if multiSource {
 				label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(source))
 			}
-			r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
-			notFound := ItemResult{
-				Name:   filepath.Base(source),
-				Status: StatusNotFound,
+			item := ItemResult{Name: filepath.Base(source)}
+			if job.Optional {
+				r.logWarn("Source not present (optional, skipping): " + source)
+				item.Status = StatusOptionalMissing
+			} else {
+				r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
+				item.Status = StatusNotFound
 			}
 			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(notFound)
-			items = append(items, notFound)
+			r.pw.FinishJob(item)
+			items = append(items, item)
 			continue
 		}
 
@@ -282,17 +286,20 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	} else {
 		_, isDirStat, err := statPath(source)
 		if err != nil {
-			r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
-			notFound := ItemResult{
-				Name:   filepath.Base(source),
-				Status: StatusNotFound,
+			item := ItemResult{Name: filepath.Base(source)}
+			if job.Optional {
+				r.logWarn("Source not present (optional, skipping): " + source)
+				item.Status = StatusOptionalMissing
+			} else {
+				r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
+				item.Status = StatusNotFound
 			}
 			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(notFound)
+			r.pw.FinishJob(item)
 			return JobResult{
 				Name:   job.Name,
 				Remote: remoteName,
-				Items:  []ItemResult{notFound},
+				Items:  []ItemResult{item},
 			}
 		}
 		isDir = isDirStat

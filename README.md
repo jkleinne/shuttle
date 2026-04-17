@@ -171,6 +171,7 @@ Each `[[job]]` entry defines one sync operation.
 | `name` | string | yes | Unique job name |
 | `engine` | string | yes | `"rsync"` or `"rclone"` |
 | `extra_flags` | string array | no | Additional flags appended after defaults |
+| `optional` | bool | no | When `true`, a missing local source is a non-fatal outcome instead of a failure. The run exits 0 and the summary shows `○ source missing (optional)`. Useful for jobs tied to detachable devices (external drives, e-readers) that may not always be mounted. Has no effect when the source is an rclone remote path (contains `:`), since those paths are not stat'd locally. Default: `false`. |
 
 **Rsync jobs** (`engine = "rsync"`)
 

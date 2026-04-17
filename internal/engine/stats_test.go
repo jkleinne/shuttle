@@ -240,6 +240,33 @@ func TestSummary_HasErrors_ReturnsTrue_WhenAnyNotFound(t *testing.T) {
 	}
 }
 
+func TestSummary_HasErrors_ReturnsFalse_WhenOnlyOptionalMissing(t *testing.T) {
+	// StatusOptionalMissing is an explicit user-opted-in outcome for
+	// detachable sources. It must not contribute to HasErrors or the
+	// run will exit non-zero on normal "device not plugged in" cases.
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "job1", Items: []ItemResult{{Status: StatusOK}}},
+			{Name: "koreader", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		},
+	}
+	if s.HasErrors() {
+		t.Error("HasErrors() = true, want false when only optional-missing items are non-OK")
+	}
+}
+
+func TestSummary_HasErrors_ReturnsTrue_WhenOptionalMissingMixedWithFailed(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "koreader", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+			{Name: "docs", Items: []ItemResult{{Status: StatusFailed}}},
+		},
+	}
+	if !s.HasErrors() {
+		t.Error("HasErrors() = false, want true when any item is StatusFailed")
+	}
+}
+
 func TestJobLabel(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -624,5 +651,209 @@ func TestRenderSummary_WithColor(t *testing.T) {
 	}
 	if !strings.Contains(out, ansiBold+ansiBlue) {
 		t.Error("header should use bold blue")
+	}
+}
+
+func TestStatusSymbol_OptionalMissing_PlainText(t *testing.T) {
+	got := statusSymbol(StatusOptionalMissing, false)
+	if got != "○" {
+		t.Errorf("statusSymbol(StatusOptionalMissing, false) = %q, want \"○\"", got)
+	}
+}
+
+func TestItemStatsText_OptionalMissing_PlainText(t *testing.T) {
+	item := ItemResult{Status: StatusOptionalMissing}
+	got := itemStatsText(item, false)
+	if got != "source missing (optional)" {
+		t.Errorf("itemStatsText = %q, want \"source missing (optional)\"", got)
+	}
+}
+
+func TestJobStatus_AllOptionalMissing(t *testing.T) {
+	job := JobResult{
+		Name: "koreader",
+		Items: []ItemResult{
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusOptionalMissing {
+		t.Errorf("jobStatus = %q, want %q", got, StatusOptionalMissing)
+	}
+}
+
+func TestJobStatus_MixedOKAndOptionalMissing_IsOK(t *testing.T) {
+	// Multi-source rsync: one source present and synced, one absent.
+	// The job is not a failure; the tally counts it as passed.
+	job := JobResult{
+		Name: "photos",
+		Items: []ItemResult{
+			{Status: StatusOK},
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusOK {
+		t.Errorf("jobStatus = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestJobStatus_FailedWinsOverOptionalMissing(t *testing.T) {
+	job := JobResult{
+		Name: "photos",
+		Items: []ItemResult{
+			{Status: StatusFailed},
+			{Status: StatusOptionalMissing},
+		},
+	}
+	if got := jobStatus(job); got != StatusFailed {
+		t.Errorf("jobStatus = %q, want %q", got, StatusFailed)
+	}
+}
+
+func TestJobStatus_EmptyItems_IsOK(t *testing.T) {
+	// Defensive guard: the JobResult invariant says Items is always
+	// non-empty, but jobStatus must still return a safe bucket if an
+	// empty JobResult ever reaches it. StatusOK is correct ("nothing
+	// happened" is not a failure and is not an explicit optional skip).
+	job := JobResult{Name: "empty"}
+	if got := jobStatus(job); got != StatusOK {
+		t.Errorf("jobStatus(empty) = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestStatus_IsFailure(t *testing.T) {
+	// Pins the single-source-of-truth predicate used by HasErrors,
+	// collectErrors, and aggregateStatus. StatusOptionalMissing must
+	// not register as a failure.
+	cases := []struct {
+		status Status
+		want   bool
+	}{
+		{StatusOK, false},
+		{StatusFailed, true},
+		{StatusNotFound, true},
+		{StatusSkipped, false},
+		{StatusOptionalMissing, false},
+	}
+	for _, tc := range cases {
+		if got := tc.status.IsFailure(); got != tc.want {
+			t.Errorf("Status(%q).IsFailure() = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}
+
+func TestCanCollapseGroup_AllOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if !canCollapseGroup(group) {
+		t.Error("canCollapseGroup = false, want true for all-optional-missing group")
+	}
+}
+
+func TestFormatTally_IncludesOptionalSegment(t *testing.T) {
+	got := formatTally(5, 1, 2, 30*time.Second, false)
+	if !strings.Contains(got, "5 passed") {
+		t.Errorf("missing '5 passed' in %q", got)
+	}
+	if !strings.Contains(got, "1 optional") {
+		t.Errorf("missing '1 optional' in %q", got)
+	}
+	if !strings.Contains(got, "2 failed") {
+		t.Errorf("missing '2 failed' in %q", got)
+	}
+}
+
+func TestFormatTally_OmitsOptionalWhenZero(t *testing.T) {
+	got := formatTally(5, 0, 0, 10*time.Second, false)
+	if strings.Contains(got, "optional") {
+		t.Errorf("unexpected 'optional' segment in %q", got)
+	}
+}
+
+func TestRenderSummary_OptionalMissingRclone_TallyAndSymbol(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "photos", Items: []ItemResult{
+				{Name: "gallery", Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+			}},
+			{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{
+				{Name: "books", Status: StatusOptionalMissing},
+			}},
+			{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{
+				{Name: "books", Status: StatusOptionalMissing},
+			}},
+		},
+		Duration: 5 * time.Second,
+	}
+	var buf strings.Builder
+	RenderSummary(&buf, s, false)
+	out := buf.String()
+
+	if !strings.Contains(out, "○") {
+		t.Error("missing optional-missing symbol ○")
+	}
+	if !strings.Contains(out, "source missing (optional)") {
+		t.Error("missing optional-missing text")
+	}
+	if !strings.Contains(out, "1 passed") {
+		t.Errorf("tally should read '1 passed' (photos), got: %s", out)
+	}
+	if !strings.Contains(out, "1 optional") {
+		t.Errorf("tally should read '1 optional' (koreader group), got: %s", out)
+	}
+	if strings.Contains(out, "failed") {
+		t.Errorf("tally should not include 'failed' segment when no failures, got: %s", out)
+	}
+}
+
+func TestCanCollapseGroup_MixedOKAndOptionalMissing_DoesNotCollapse(t *testing.T) {
+	// Pins the contract that only uniform groups collapse. A group with one
+	// OK remote and one OptionalMissing remote must expand into the tree
+	// view so the user can see both outcomes per remote.
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{
+			{Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+		}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{
+			{Status: StatusOptionalMissing},
+		}},
+	}
+	if canCollapseGroup(group) {
+		t.Error("canCollapseGroup = true, want false for mixed OK + OptionalMissing")
+	}
+}
+
+func TestGroupStatus_AllOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusOptionalMissing {
+		t.Errorf("groupStatus = %q, want %q", got, StatusOptionalMissing)
+	}
+}
+
+func TestGroupStatus_MixedOKAndOptionalMissing_IsOK(t *testing.T) {
+	// Mirrors the jobStatus rule: a group with real syncs and one
+	// optional-missing remote counts as "work happened" → StatusOK.
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{
+			{Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+		}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusOK {
+		t.Errorf("groupStatus = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestGroupStatus_FailedWinsOverOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusFailed}}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusFailed {
+		t.Errorf("groupStatus = %q, want %q", got, StatusFailed)
 	}
 }

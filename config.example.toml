@@ -77,3 +77,5 @@ source = "/mnt/backup/media"
 remotes = ["my_gdrive"]
 mode = "copy"
 bwlimit = "2M"
+# optional = true          # skip without failure if the local source is absent
+                            # (useful for detachable devices like external drives)

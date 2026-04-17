@@ -80,6 +80,11 @@ type Job struct {
 	Name       string   `toml:"name"`
 	Engine     string   `toml:"engine"`
 	ExtraFlags []string `toml:"extra_flags"`
+	// Optional, when true, treats a missing local source as a non-fatal
+	// outcome instead of a failure. Has no effect for rclone remote
+	// sources (paths containing ":") since those are not stat'd before
+	// invocation.
+	Optional bool `toml:"optional"`
 
 	// Rsync fields
 	Sources     []string `toml:"sources"`
