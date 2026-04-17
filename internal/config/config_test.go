@@ -510,3 +510,39 @@ destination = "/tmp/dst"
 		t.Errorf("Jobs = %v, want one job named xdg-job", cfg.Jobs)
 	}
 }
+
+func TestLoad_OptionalField_ExplicitTrue(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "koreader-to-cloud"
+engine = "rclone"
+source = "/Volumes/KOREADER/books"
+remotes = ["crypt_gdrive"]
+mode = "copy"
+optional = true
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Jobs[0].Optional {
+		t.Error("Jobs[0].Optional = false, want true")
+	}
+}
+
+func TestLoad_OptionalField_DefaultsToFalse(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Jobs[0].Optional {
+		t.Error("Jobs[0].Optional = true, want false (zero value)")
+	}
+}
