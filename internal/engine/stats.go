@@ -23,6 +23,11 @@ const (
 	StatusSkipped Status = "skipped"
 	// StatusNotFound means the source path or remote could not be resolved.
 	StatusNotFound Status = "not_found"
+	// StatusOptionalMissing means the job was marked optional and its
+	// local source was not present at run time. Treated as a non-failure
+	// outcome: excluded from Summary.HasErrors() and rendered with its
+	// own dedicated symbol and tally segment.
+	StatusOptionalMissing Status = "optional_missing"
 )
 
 // TransferStats holds the quantitative output of a single rsync or rclone run.
@@ -74,10 +79,13 @@ type Summary struct {
 	DryRun   bool
 }
 
-// HasErrors returns true when at least one item across all jobs has StatusFailed
-// or StatusNotFound. Both statuses represent failure conditions: StatusFailed
-// means the tool ran but the sync failed; StatusNotFound means the source path
-// could not be resolved before the tool was invoked.
+// HasErrors returns true when at least one item across all jobs has
+// StatusFailed or StatusNotFound. Both statuses represent failure
+// conditions: StatusFailed means the tool ran but the sync failed;
+// StatusNotFound means the source path could not be resolved before the
+// tool was invoked. StatusOptionalMissing is deliberately excluded —
+// it represents a user-opted-in "skip if source absent" outcome and
+// must not trigger a non-zero exit.
 // Used by the CLI to choose a non-zero exit code after partial failures.
 func (s Summary) HasErrors() bool {
 	for _, job := range s.Jobs {

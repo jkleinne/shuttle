@@ -240,6 +240,33 @@ func TestSummary_HasErrors_ReturnsTrue_WhenAnyNotFound(t *testing.T) {
 	}
 }
 
+func TestSummary_HasErrors_ReturnsFalse_WhenOnlyOptionalMissing(t *testing.T) {
+	// StatusOptionalMissing is an explicit user-opted-in outcome for
+	// detachable sources. It must not contribute to HasErrors or the
+	// run will exit non-zero on normal "device not plugged in" cases.
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "job1", Items: []ItemResult{{Status: StatusOK}}},
+			{Name: "koreader", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		},
+	}
+	if s.HasErrors() {
+		t.Error("HasErrors() = true, want false when only optional-missing items are non-OK")
+	}
+}
+
+func TestSummary_HasErrors_ReturnsTrue_WhenOptionalMissingMixedWithFailed(t *testing.T) {
+	s := Summary{
+		Jobs: []JobResult{
+			{Name: "koreader", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+			{Name: "docs", Items: []ItemResult{{Status: StatusFailed}}},
+		},
+	}
+	if !s.HasErrors() {
+		t.Error("HasErrors() = false, want true when any item is StatusFailed")
+	}
+}
+
 func TestJobLabel(t *testing.T) {
 	tests := []struct {
 		name   string
