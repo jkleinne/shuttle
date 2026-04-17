@@ -285,17 +285,20 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	} else {
 		_, isDirStat, err := statPath(source)
 		if err != nil {
-			r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
-			notFound := ItemResult{
-				Name:   filepath.Base(source),
-				Status: StatusNotFound,
+			item := ItemResult{Name: filepath.Base(source)}
+			if job.Optional {
+				r.logWarn(fmt.Sprintf("Source not present (optional, skipping): %s", source))
+				item.Status = StatusOptionalMissing
+			} else {
+				r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
+				item.Status = StatusNotFound
 			}
 			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(notFound)
+			r.pw.FinishJob(item)
 			return JobResult{
 				Name:   job.Name,
 				Remote: remoteName,
-				Items:  []ItemResult{notFound},
+				Items:  []ItemResult{item},
 			}
 		}
 		isDir = isDirStat

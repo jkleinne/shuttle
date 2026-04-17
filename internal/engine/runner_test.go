@@ -223,3 +223,54 @@ func TestRunRsyncJob_Optional_MultiSource_PresentAndMissing(t *testing.T) {
 		t.Error("expected one StatusOptionalMissing item for the absent source")
 	}
 }
+
+func TestRunRcloneJob_Optional_MissingLocalSource_MarksOptionalMissing(t *testing.T) {
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	missing := filepath.Join(t.TempDir(), "koreader-absent")
+	job := config.Job{
+		Name:     "koreader-to-cloud",
+		Engine:   config.EngineRclone,
+		Source:   missing,
+		Remotes:  []string{"crypt_gdrive"},
+		Mode:     config.ModeCopy,
+		Optional: true,
+	}
+
+	result := r.runRcloneJob(context.Background(), job, "crypt_gdrive", "2026-04-16_120000")
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusOptionalMissing {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusOptionalMissing)
+	}
+	if result.Remote != "crypt_gdrive" {
+		t.Errorf("Remote = %q, want %q", result.Remote, "crypt_gdrive")
+	}
+	if !strings.Contains(termBuf.String(), "optional") {
+		t.Errorf("expected log output to mention 'optional', got: %s", termBuf.String())
+	}
+}
+
+func TestRunRcloneJob_NotOptional_MissingLocalSource_MarksNotFound(t *testing.T) {
+	// Regression: existing non-optional behavior must be preserved.
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	missing := filepath.Join(t.TempDir(), "absent")
+	job := config.Job{
+		Name:    "docs-to-cloud",
+		Engine:  config.EngineRclone,
+		Source:  missing,
+		Remotes: []string{"crypt_gdrive"},
+		Mode:    config.ModeCopy,
+	}
+
+	result := r.runRcloneJob(context.Background(), job, "crypt_gdrive", "2026-04-16_120000")
+
+	if result.Items[0].Status != StatusNotFound {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
+	}
+}
