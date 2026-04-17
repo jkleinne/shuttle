@@ -774,3 +774,54 @@ func TestRenderSummary_OptionalMissingRclone_TallyAndSymbol(t *testing.T) {
 		t.Errorf("tally should not include 'failed' segment when no failures, got: %s", out)
 	}
 }
+
+func TestCanCollapseGroup_MixedOKAndOptionalMissing_DoesNotCollapse(t *testing.T) {
+	// Pins the contract that only uniform groups collapse. A group with one
+	// OK remote and one OptionalMissing remote must expand into the tree
+	// view so the user can see both outcomes per remote.
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{
+			{Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+		}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{
+			{Status: StatusOptionalMissing},
+		}},
+	}
+	if canCollapseGroup(group) {
+		t.Error("canCollapseGroup = true, want false for mixed OK + OptionalMissing")
+	}
+}
+
+func TestGroupStatus_AllOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "koreader", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+		{Name: "koreader", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusOptionalMissing {
+		t.Errorf("groupStatus = %q, want %q", got, StatusOptionalMissing)
+	}
+}
+
+func TestGroupStatus_MixedOKAndOptionalMissing_IsOK(t *testing.T) {
+	// Mirrors the jobStatus rule: a group with real syncs and one
+	// optional-missing remote counts as "work happened" → StatusOK.
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{
+			{Status: StatusOK, Stats: TransferStats{FilesChecked: 100}},
+		}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusOK {
+		t.Errorf("groupStatus = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestGroupStatus_FailedWinsOverOptionalMissing(t *testing.T) {
+	group := []JobResult{
+		{Name: "mixed", Remote: "crypt_gdrive", Items: []ItemResult{{Status: StatusFailed}}},
+		{Name: "mixed", Remote: "crypt_koofr", Items: []ItemResult{{Status: StatusOptionalMissing}}},
+	}
+	if got := groupStatus(group); got != StatusFailed {
+		t.Errorf("groupStatus = %q, want %q", got, StatusFailed)
+	}
+}
