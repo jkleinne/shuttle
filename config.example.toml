@@ -81,6 +81,8 @@ bwlimit = "2M"
                             # (useful for detachable devices like external drives)
 # max_runtime = "2h"       # cap per-invocation wall-clock time; Shuttle kills
                             # the tool and reports "timed out" (counts as a
-                            # failure) if exceeded. Omit to disable the timeout.
-                            # Applies per invocation: a job with N rclone remotes
-                            # gets N independent timeouts.
+                            # failure, exit 1) if exceeded. Omit to disable.
+                            # Format: Go duration string (e.g. "30s", "5m",
+                            # "2h", "1h30m"). Applies per invocation: rsync
+                            # jobs with N sources and rclone jobs with N
+                            # remotes each get N independent timeouts.
