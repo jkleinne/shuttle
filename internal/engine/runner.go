@@ -218,7 +218,8 @@ func collectErrors(jobs []JobResult) []string {
 }
 
 // classifyExitStatus maps the combination of a context and a command run error
-// to the appropriate Status. It must be called after cmd.Wait() returns.
+// to the appropriate Status. Call after the command has terminated or failed
+// to start (both cmd.Start and cmd.Wait error paths).
 //
 // When ctx.Err() is context.DeadlineExceeded the job's per-invocation deadline
 // elapsed, so StatusTimedOut is returned regardless of runErr. When ctx.Err()
