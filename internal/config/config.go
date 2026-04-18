@@ -175,18 +175,16 @@ func (c *Config) ResolvedLogRetentionDays() int {
 }
 
 // MaxRuntimeDuration returns the parsed max_runtime value, or 0 when
-// the field is empty (meaning "no timeout"). Invalid values are rejected
-// during validation and never reach this method; the error branch here
-// is defensive.
-func (j Job) MaxRuntimeDuration() time.Duration {
+// the field is empty (meaning "no timeout"). The LoadBytes/LoadFile
+// path validates max_runtime at parse time, so callers on that path
+// never see the error. Callers that construct Job literals directly
+// (e.g. tests) must handle the error explicitly so typos surface
+// immediately instead of silently becoming "no timeout".
+func (j Job) MaxRuntimeDuration() (time.Duration, error) {
 	if j.MaxRuntime == "" {
-		return 0
+		return 0, nil
 	}
-	d, err := time.ParseDuration(j.MaxRuntime)
-	if err != nil {
-		return 0
-	}
-	return d
+	return time.ParseDuration(j.MaxRuntime)
 }
 
 // JobNames returns the names of all configured jobs in config order.
@@ -363,8 +361,11 @@ func validateMaxRuntime(job Job) error {
 	if err != nil {
 		return fmt.Errorf("job %q: invalid max_runtime %q: %w", job.Name, job.MaxRuntime, err)
 	}
-	if d <= 0 {
-		return fmt.Errorf("job %q: max_runtime must be > 0 (got %q); omit the field to disable the timeout", job.Name, job.MaxRuntime)
+	if d == 0 {
+		return fmt.Errorf("job %q: max_runtime is %q; omit the field to disable the timeout", job.Name, job.MaxRuntime)
+	}
+	if d < 0 {
+		return fmt.Errorf("job %q: max_runtime must be positive (got %q)", job.Name, job.MaxRuntime)
 	}
 	return nil
 }

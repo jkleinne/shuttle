@@ -564,7 +564,11 @@ max_runtime = "2h"
 	if cfg.Jobs[0].MaxRuntime != "2h" {
 		t.Errorf("MaxRuntime = %q, want \"2h\"", cfg.Jobs[0].MaxRuntime)
 	}
-	if got := cfg.Jobs[0].MaxRuntimeDuration(); got != 2*time.Hour {
+	got, err := cfg.Jobs[0].MaxRuntimeDuration()
+	if err != nil {
+		t.Fatalf("MaxRuntimeDuration() error = %v", err)
+	}
+	if got != 2*time.Hour {
 		t.Errorf("MaxRuntimeDuration() = %v, want 2h", got)
 	}
 }
@@ -584,7 +588,11 @@ destination = "/tmp/backup"
 	if cfg.Jobs[0].MaxRuntime != "" {
 		t.Errorf("MaxRuntime = %q, want empty", cfg.Jobs[0].MaxRuntime)
 	}
-	if got := cfg.Jobs[0].MaxRuntimeDuration(); got != 0 {
+	got, err := cfg.Jobs[0].MaxRuntimeDuration()
+	if err != nil {
+		t.Fatalf("MaxRuntimeDuration() error = %v", err)
+	}
+	if got != 0 {
 		t.Errorf("MaxRuntimeDuration() = %v, want 0", got)
 	}
 }
@@ -623,6 +631,9 @@ max_runtime = "-5m"
 	}
 	if !strings.Contains(err.Error(), "photos") {
 		t.Errorf("error %q should mention job name", err.Error())
+	}
+	if !strings.Contains(err.Error(), "positive") {
+		t.Errorf("error %q should mention \"positive\"", err.Error())
 	}
 }
 
