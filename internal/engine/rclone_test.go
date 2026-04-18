@@ -483,3 +483,27 @@ func TestCleanupArchives_KeepsRecent(t *testing.T) {
 		t.Error("recent archive dir should still exist")
 	}
 }
+
+func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
+	skipIfNoRclone(t)
+
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+
+	// A context whose deadline is already in the past will cause exec.CommandContext
+	// to kill the process immediately, producing a DeadlineExceeded context error.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	result := executor.Exec(ctx, args, nil)
+
+	if result.Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Status, StatusTimedOut)
+	}
+}

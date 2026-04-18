@@ -3,12 +3,14 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
@@ -267,5 +269,66 @@ func TestRunRcloneJob_NotOptional_MissingLocalSource_MarksNotFound(t *testing.T)
 
 	if result.Items[0].Status != StatusNotFound {
 		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
+	}
+}
+
+func TestClassifyExitStatus(t *testing.T) {
+	someErr := errors.New("command failed")
+
+	// "deadline first then parent cancel": construct a context that has already
+	// exceeded its deadline, then cancel the parent. context.Err() returns
+	// whichever terminal state was reached first — DeadlineExceeded — and stays
+	// there regardless of the subsequent cancel.
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	pastDeadline := time.Now().Add(-1 * time.Second)
+	deadlineFirstCtx, deadlineFirstCancel := context.WithDeadline(parentCtx, pastDeadline)
+	// Trigger the parent cancel so both conditions are true, but deadline was first.
+	parentCancel()
+	defer deadlineFirstCancel()
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		runErr  error
+		want    Status
+	}{
+		{
+			name:   "ok context, nil error",
+			ctx:    context.Background(),
+			runErr: nil,
+			want:   StatusOK,
+		},
+		{
+			name:   "ok context, non-nil error",
+			ctx:    context.Background(),
+			runErr: someErr,
+			want:   StatusFailed,
+		},
+		{
+			name:   "deadline exceeded context, non-nil error",
+			ctx:    func() context.Context { c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second)); t.Cleanup(cancel); return c }(),
+			runErr: someErr,
+			want:   StatusTimedOut,
+		},
+		{
+			name:   "canceled context, non-nil error",
+			ctx:    func() context.Context { c, cancel := context.WithCancel(context.Background()); cancel(); return c }(),
+			runErr: someErr,
+			want:   StatusFailed,
+		},
+		{
+			name:   "deadline first then parent cancel",
+			ctx:    deadlineFirstCtx,
+			runErr: someErr,
+			want:   StatusTimedOut,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyExitStatus(tt.ctx, tt.runErr)
+			if got != tt.want {
+				t.Errorf("classifyExitStatus(...) = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

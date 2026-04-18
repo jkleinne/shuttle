@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -214,6 +215,26 @@ func collectErrors(jobs []JobResult) []string {
 		}
 	}
 	return errs
+}
+
+// classifyExitStatus maps the combination of a context and a command run error
+// to the appropriate Status. It must be called after cmd.Wait() returns.
+//
+// When ctx.Err() is context.DeadlineExceeded the job's per-invocation deadline
+// elapsed, so StatusTimedOut is returned regardless of runErr. When ctx.Err()
+// is context.Canceled the parent was cancelled (e.g. by a signal), which is
+// treated as an ordinary failure. context.Err() returns whichever terminal
+// state the context reached first and stays there, so the "deadline first then
+// parent cancel" case naturally resolves to StatusTimedOut without any extra
+// ordering logic.
+func classifyExitStatus(ctx context.Context, runErr error) Status {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return StatusTimedOut
+	}
+	if runErr != nil {
+		return StatusFailed
+	}
+	return StatusOK
 }
 
 // runRsyncJob iterates each source in the job and calls rsync.

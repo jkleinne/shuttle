@@ -136,8 +136,13 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	}
 
 	if err := cmd.Start(); err != nil {
-		e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
-		return ItemResult{Name: displayName, Status: StatusFailed}
+		status := classifyExitStatus(ctx, err)
+		if status == StatusTimedOut {
+			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime", displayName))
+		} else {
+			e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
+		}
+		return ItemResult{Name: displayName, Status: status}
 	}
 
 	var pipeWg sync.WaitGroup
@@ -168,14 +173,17 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	}
 	stats.Elapsed = elapsed
 
-	status := StatusOK
+	status := classifyExitStatus(ctx, runErr)
 	if runErr != nil {
-		status = StatusFailed
-		subcommand := "rclone"
-		if len(args) > 0 {
-			subcommand = "rclone " + args[0]
+		if status == StatusTimedOut {
+			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime", displayName))
+		} else {
+			subcommand := "rclone"
+			if len(args) > 0 {
+				subcommand = "rclone " + args[0]
+			}
+			e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
 		}
-		e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
 	}
 
 	return ItemResult{Name: displayName, Status: status, Stats: stats}

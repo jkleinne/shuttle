@@ -121,8 +121,13 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		e.logger.FileError(fmt.Sprintf("rsync start failed for %s: %v", source, err))
-		return ItemResult{Name: name, Status: StatusFailed}
+		status := classifyExitStatus(ctx, err)
+		if status == StatusTimedOut {
+			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime", source))
+		} else {
+			e.logger.FileError(fmt.Sprintf("rsync start failed for %s: %v", source, err))
+		}
+		return ItemResult{Name: name, Status: status}
 	}
 
 	var pipeWg sync.WaitGroup
@@ -148,10 +153,13 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	stats := ParseRsyncStats(capture.Bytes())
 	stats.Elapsed = elapsed
 
-	status := StatusOK
+	status := classifyExitStatus(ctx, runErr)
 	if runErr != nil {
-		status = StatusFailed
-		e.logger.FileError(fmt.Sprintf("rsync failed for %s: %v", source, runErr))
+		if status == StatusTimedOut {
+			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime", source))
+		} else {
+			e.logger.FileError(fmt.Sprintf("rsync failed for %s: %v", source, runErr))
+		}
 	}
 
 	return ItemResult{Name: name, Status: status, Stats: stats}

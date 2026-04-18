@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
@@ -204,5 +206,32 @@ func TestScanRsyncProgress_CallsOnProgress(t *testing.T) {
 	}
 	if !strings.Contains(called[len(called)-1], "45%") {
 		t.Errorf("last progress = %q, want something containing 45%%", called[len(called)-1])
+	}
+}
+
+func TestRsyncExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+
+	// A context whose deadline is already in the past will cause exec.CommandContext
+	// to kill the process immediately, producing a DeadlineExceeded context error.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	defaults := &config.RsyncDefaults{Flags: []string{"-a"}}
+	args := BuildRsyncArgs(defaults, config.Job{}, src+"/", dst+"/", false, false, "")
+
+	executor := NewRsyncExecutor(newTestLogger(t))
+	result := executor.Exec(ctx, args, nil)
+
+	if result.Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Status, StatusTimedOut)
 	}
 }
