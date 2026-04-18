@@ -654,3 +654,48 @@ max_runtime = "banana"
 		t.Errorf("error %q should mention job name", err.Error())
 	}
 }
+
+func TestLoad_MaxRuntime_RcloneJob_ValidatedAndExposed(t *testing.T) {
+	// validateMaxRuntime is called from both validateRsyncJob and
+	// validateRcloneJob. The other tests cover the rsync path; this
+	// pins that the validator runs for rclone jobs too.
+	tomlData := `
+[[job]]
+name = "docs-to-cloud"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["my_gdrive"]
+mode = "copy"
+max_runtime = "30m"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, err := cfg.Jobs[0].MaxRuntimeDuration()
+	if err != nil {
+		t.Fatalf("MaxRuntimeDuration() error = %v", err)
+	}
+	if got != 30*time.Minute {
+		t.Errorf("MaxRuntimeDuration() = %v, want 30m", got)
+	}
+}
+
+func TestLoad_MaxRuntime_RcloneJob_NegativeRejected(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "docs-to-cloud"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["my_gdrive"]
+mode = "copy"
+max_runtime = "-1h"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for negative max_runtime on rclone job, got nil")
+	}
+	if !strings.Contains(err.Error(), "docs-to-cloud") {
+		t.Errorf("error %q should mention job name", err.Error())
+	}
+}

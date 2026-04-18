@@ -371,6 +371,47 @@ func TestRunRsyncJob_ParentCanceled_ReturnsFailedNotTimedOut(t *testing.T) {
 	}
 }
 
+func TestRunRcloneJob_MaxRuntime_FiresAndReportsTimedOut(t *testing.T) {
+	// Symmetric to TestRunRsyncJob_MaxRuntime_FiresAndReportsTimedOut: pins
+	// that the jobContext wiring at the rclone call site flows the deadline
+	// through to RcloneExecutor and the resulting context error is classified
+	// as StatusTimedOut. The executor-level rclone timeout test covers the
+	// classification in isolation; this one covers the runner-level wiring.
+	if _, err := exec.LookPath("rclone"); err != nil {
+		t.Skip("rclone not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("seeding source: %v", err)
+	}
+
+	job := config.Job{
+		Name:    "timeout-rclone-job",
+		Engine:  config.EngineRclone,
+		Source:  src,
+		Remotes: []string{"any-remote"},
+		Mode:    config.ModeCopy,
+		// --config /dev/null avoids touching the developer's real rclone config
+		// during the test. The remote name is irrelevant because the 1ms
+		// deadline kills the process before rclone resolves the remote.
+		ExtraFlags: []string{"--config", "/dev/null"},
+		MaxRuntime: "1ms",
+	}
+
+	result := r.runRcloneJob(context.Background(), job, "any-remote", "2026-04-18_000000")
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusTimedOut)
+	}
+}
+
 func TestClassifyExitStatus(t *testing.T) {
 	someErr := errors.New("command failed")
 
