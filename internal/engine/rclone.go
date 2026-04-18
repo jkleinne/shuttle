@@ -138,7 +138,7 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	if err := cmd.Start(); err != nil {
 		status := classifyExitStatus(ctx, err)
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime", displayName))
+			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime: %v", displayName, err))
 		} else {
 			e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
 		}
@@ -175,13 +175,13 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 
 	status := classifyExitStatus(ctx, runErr)
 	if runErr != nil {
+		subcommand := "rclone"
+		if len(args) > 0 {
+			subcommand = "rclone " + args[0]
+		}
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime", displayName))
+			e.logger.FileError(fmt.Sprintf("%s timed out for %s after per-job max_runtime: %v", subcommand, displayName, runErr))
 		} else {
-			subcommand := "rclone"
-			if len(args) > 0 {
-				subcommand = "rclone " + args[0]
-			}
 			e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
 		}
 	}

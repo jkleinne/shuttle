@@ -123,7 +123,7 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	if err := cmd.Start(); err != nil {
 		status := classifyExitStatus(ctx, err)
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime", source))
+			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime: %v", source, err))
 		} else {
 			e.logger.FileError(fmt.Sprintf("rsync start failed for %s: %v", source, err))
 		}
@@ -156,7 +156,7 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	status := classifyExitStatus(ctx, runErr)
 	if runErr != nil {
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime", source))
+			e.logger.FileError(fmt.Sprintf("rsync timed out for %s after per-job max_runtime: %v", source, runErr))
 		} else {
 			e.logger.FileError(fmt.Sprintf("rsync failed for %s: %v", source, runErr))
 		}
