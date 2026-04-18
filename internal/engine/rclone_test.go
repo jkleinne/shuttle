@@ -499,6 +499,8 @@ func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 	defer cancel()
 
 	executor, logPath := newRcloneTestExecutor(t)
+	// --config /dev/null prevents rclone from loading the developer's
+	// real rclone config during the test.
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
 	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
 	result := executor.Exec(ctx, args, nil)
