@@ -184,6 +184,9 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 	results := make([]JobResult, 0, len(remotes))
 	for _, remote := range remotes {
 		r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
+		// CleanupArchives deliberately uses the parent ctx, not the per-invocation
+		// jobCtx created inside runRcloneJob: a slow housekeeping pass shouldn't
+		// inherit the job's max_runtime and cause the cleanup to time out.
 		if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
 			r.logWarn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
 		}
@@ -295,6 +298,10 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
 		r.logger.Debug(formatExec("rsync", args))
 
+		// MaxRuntimeDuration returns (0, nil) for empty or (duration, nil) for
+		// validated input. The LoadBytes path rejects bad values at parse time,
+		// so discarding the error is safe here; callers bypassing validation
+		// (e.g. direct Job literals in tests) see that branch instead.
 		maxRuntime, _ := job.MaxRuntimeDuration()
 		jobCtx, cancel := jobContext(ctx, maxRuntime)
 
@@ -367,6 +374,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 	r.logger.Debug(formatExec("rclone", args))
 
+	// See the rsync branch for why the error is discarded; same reasoning applies.
 	maxRuntime, _ := job.MaxRuntimeDuration()
 	jobCtx, cancel := jobContext(ctx, maxRuntime)
 	defer cancel()
