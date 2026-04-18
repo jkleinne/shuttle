@@ -238,6 +238,19 @@ func classifyExitStatus(ctx context.Context, runErr error) Status {
 	return StatusOK
 }
 
+// jobContext returns a context and cancel function for a single rsync or rclone
+// invocation. When maxRuntime is zero the parent context is returned unchanged
+// with a no-op cancel so callers can always defer cancel() safely. When
+// maxRuntime is positive a child context with the corresponding deadline is
+// returned; the caller is responsible for calling cancel to release the timer
+// resource.
+func jobContext(parent context.Context, maxRuntime time.Duration) (context.Context, context.CancelFunc) {
+	if maxRuntime <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, maxRuntime)
+}
+
 // runRsyncJob iterates each source in the job and calls rsync.
 func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 	var items []ItemResult
@@ -282,8 +295,12 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
 		r.logger.Debug(formatExec("rsync", args))
 
-		r.pw.StartJob(ctx, label)
-		result := r.rsync.Exec(ctx, args, r.pw.ProgressCallback())
+		maxRuntime, _ := job.MaxRuntimeDuration()
+		jobCtx, cancel := jobContext(ctx, maxRuntime)
+
+		r.pw.StartJob(jobCtx, label)
+		result := r.rsync.Exec(jobCtx, args, r.pw.ProgressCallback())
+		cancel()
 		r.pw.FinishJob(result)
 		items = append(items, result)
 	}
@@ -350,8 +367,12 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 	r.logger.Debug(formatExec("rclone", args))
 
-	r.pw.StartJob(ctx, label)
-	result := r.rclone.Exec(ctx, args, r.pw.ProgressCallback())
+	maxRuntime, _ := job.MaxRuntimeDuration()
+	jobCtx, cancel := jobContext(ctx, maxRuntime)
+	defer cancel()
+
+	r.pw.StartJob(jobCtx, label)
+	result := r.rclone.Exec(jobCtx, args, r.pw.ProgressCallback())
 	result.Name = destName
 	if destName == "" {
 		result.Name = "(prefix root)"

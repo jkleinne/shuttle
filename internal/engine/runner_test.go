@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -269,6 +270,104 @@ func TestRunRcloneJob_NotOptional_MissingLocalSource_MarksNotFound(t *testing.T)
 
 	if result.Items[0].Status != StatusNotFound {
 		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
+	}
+}
+
+func TestJobContext_NoTimeout_HasNoDeadline(t *testing.T) {
+	ctx, cancel := jobContext(context.Background(), 0)
+	defer cancel()
+
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Error("jobContext(parent, 0) must not set a deadline")
+	}
+}
+
+func TestJobContext_WithTimeout_SetsDeadline(t *testing.T) {
+	const timeout = 1 * time.Hour
+	before := time.Now()
+	ctx, cancel := jobContext(context.Background(), timeout)
+	defer cancel()
+
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		t.Fatal("jobContext(parent, 1h) must set a deadline")
+	}
+
+	// Deadline should be approximately 1 hour from now (allow 5s of drift).
+	wantMin := before.Add(timeout - 5*time.Second)
+	wantMax := before.Add(timeout + 5*time.Second)
+	if deadline.Before(wantMin) || deadline.After(wantMax) {
+		t.Errorf("deadline %v not in expected range [%v, %v]", deadline, wantMin, wantMax)
+	}
+}
+
+func TestRunRsyncJob_MaxRuntime_FiresAndReportsTimedOut(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	// Seed enough files that rsync cannot finish in 1ms.
+	for i := range 20 {
+		name := filepath.Join(src, fmt.Sprintf("file%d.dat", i))
+		if err := os.WriteFile(name, make([]byte, 1024*1024), 0o644); err != nil {
+			t.Fatalf("seeding source: %v", err)
+		}
+	}
+
+	job := config.Job{
+		Name:        "timeout-job",
+		Engine:      config.EngineRsync,
+		Sources:     []string{src},
+		Destination: t.TempDir(),
+		MaxRuntime:  "1ms",
+	}
+
+	result := r.runRsyncJob(context.Background(), job)
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusTimedOut)
+	}
+}
+
+func TestRunRsyncJob_ParentCanceled_ReturnsFailedNotTimedOut(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("seeding source: %v", err)
+	}
+
+	// Pre-cancel the parent context before running the job.
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCancel()
+
+	job := config.Job{
+		Name:        "canceled-job",
+		Engine:      config.EngineRsync,
+		Sources:     []string{src},
+		Destination: t.TempDir(),
+		MaxRuntime:  "1h", // long timeout so the cancellation comes from the parent
+	}
+
+	result := r.runRsyncJob(parentCtx, job)
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusFailed {
+		t.Errorf("Status = %q, want %q (parent cancel must not produce StatusTimedOut)", result.Items[0].Status, StatusFailed)
 	}
 }
 
