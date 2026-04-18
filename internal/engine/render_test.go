@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func TestStatusSymbol_TimedOut_ReturnsFailed(t *testing.T) {
-	// StatusTimedOut is a failure; it must share the ✗ symbol with StatusFailed.
+func TestStatusSymbol_TimedOut_SharesFailedGlyph(t *testing.T) {
+	// StatusTimedOut is a failure; it must share the ✗ glyph with StatusFailed.
 	got := statusSymbol(StatusTimedOut, false)
 	if got != symbolFailed {
 		t.Errorf("statusSymbol(StatusTimedOut, false) = %q, want %q", got, symbolFailed)
@@ -55,6 +55,9 @@ func TestRenderSummary_TimedOut_ContainsTimedOutAndTalliesAsFailed(t *testing.T)
 
 	if !strings.Contains(output, "timed out") {
 		t.Errorf("RenderSummary output does not contain %q:\n%s", "timed out", output)
+	}
+	if !strings.Contains(output, "✗ backup") {
+		t.Errorf("RenderSummary output does not contain %q (failure glyph on job line):\n%s", "✗ backup", output)
 	}
 	if !strings.Contains(output, "1 failed") {
 		t.Errorf("RenderSummary output does not contain %q:\n%s", "1 failed", output)
