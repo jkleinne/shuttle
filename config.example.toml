@@ -79,3 +79,8 @@ mode = "copy"
 bwlimit = "2M"
 # optional = true          # skip without failure if the local source is absent
                             # (useful for detachable devices like external drives)
+# max_runtime = "2h"       # cap per-invocation wall-clock time; Shuttle kills
+                            # the tool and reports "timed out" (counts as a
+                            # failure) if exceeded. Omit to disable the timeout.
+                            # Applies per invocation: a job with N rclone remotes
+                            # gets N independent timeouts.
