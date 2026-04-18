@@ -267,6 +267,14 @@ func TestSummary_HasErrors_ReturnsTrue_WhenOptionalMissingMixedWithFailed(t *tes
 	}
 }
 
+func TestStatus_IsFailure_TimedOut(t *testing.T) {
+	// StatusTimedOut represents a job killed by its deadline; it must count as
+	// a failure so that Summary.HasErrors drives a non-zero exit code.
+	if !StatusTimedOut.IsFailure() {
+		t.Error("StatusTimedOut.IsFailure() = false, want true")
+	}
+}
+
 func TestJobLabel(t *testing.T) {
 	tests := []struct {
 		name   string

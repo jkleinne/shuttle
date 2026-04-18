@@ -38,6 +38,7 @@ const (
 	labelNotFound          = "not found"
 	labelSkipped           = "skipped"
 	labelOptionalMissing   = "source missing (optional)"
+	labelTimedOut          = "timed out"
 	tallyLabelPassed       = "passed"
 	tallyLabelOptional     = "optional"
 	tallyLabelFailed       = "failed"
@@ -56,7 +57,7 @@ func colorize(useColor bool, code, text string) string {
 // statusSymbol returns a colored status indicator character.
 func statusSymbol(status Status, useColor bool) string {
 	switch status {
-	case StatusFailed, StatusNotFound:
+	case StatusFailed, StatusNotFound, StatusTimedOut:
 		return colorize(useColor, ansiRed, symbolFailed)
 	case StatusSkipped:
 		return colorize(useColor, ansiYellow, symbolSkipped)
@@ -75,6 +76,8 @@ func itemStatsText(item ItemResult, useColor bool) string {
 		return colorize(useColor, ansiRed, labelFailed)
 	case StatusNotFound:
 		return colorize(useColor, ansiRed, labelNotFound)
+	case StatusTimedOut:
+		return colorize(useColor, ansiRed, labelTimedOut)
 	case StatusSkipped:
 		return colorize(useColor, ansiYellow, labelSkipped)
 	case StatusOptionalMissing:
