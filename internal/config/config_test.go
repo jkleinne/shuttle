@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 )
@@ -544,5 +545,101 @@ destination = "/tmp/backup"
 	}
 	if cfg.Jobs[0].Optional {
 		t.Error("Jobs[0].Optional = true, want false (zero value)")
+	}
+}
+
+func TestLoad_MaxRuntime_ParsedAndExposed(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+max_runtime = "2h"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Jobs[0].MaxRuntime != "2h" {
+		t.Errorf("MaxRuntime = %q, want \"2h\"", cfg.Jobs[0].MaxRuntime)
+	}
+	if got := cfg.Jobs[0].MaxRuntimeDuration(); got != 2*time.Hour {
+		t.Errorf("MaxRuntimeDuration() = %v, want 2h", got)
+	}
+}
+
+func TestLoad_MaxRuntime_Absent_DurationIsZero(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Jobs[0].MaxRuntime != "" {
+		t.Errorf("MaxRuntime = %q, want empty", cfg.Jobs[0].MaxRuntime)
+	}
+	if got := cfg.Jobs[0].MaxRuntimeDuration(); got != 0 {
+		t.Errorf("MaxRuntimeDuration() = %v, want 0", got)
+	}
+}
+
+func TestLoad_MaxRuntime_Zero_Rejected(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+max_runtime = "0s"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for max_runtime = \"0s\", got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "photos") || !strings.Contains(msg, "max_runtime") {
+		t.Errorf("error %q should mention job name and field", msg)
+	}
+}
+
+func TestLoad_MaxRuntime_Negative_Rejected(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+max_runtime = "-5m"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for negative max_runtime, got nil")
+	}
+	if !strings.Contains(err.Error(), "photos") {
+		t.Errorf("error %q should mention job name", err.Error())
+	}
+}
+
+func TestLoad_MaxRuntime_Malformed_Rejected(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "photos"
+engine = "rsync"
+sources = ["/tmp/photos"]
+destination = "/tmp/backup"
+max_runtime = "banana"
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for malformed max_runtime, got nil")
+	}
+	if !strings.Contains(err.Error(), "photos") {
+		t.Errorf("error %q should mention job name", err.Error())
 	}
 }

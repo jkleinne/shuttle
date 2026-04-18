@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -85,6 +86,12 @@ type Job struct {
 	// sources (paths containing ":") since those are not stat'd before
 	// invocation.
 	Optional bool `toml:"optional"`
+	// MaxRuntime caps the wall-clock duration of each rsync/rclone
+	// invocation. Parsed via time.ParseDuration (e.g. "30m", "2h"). Empty
+	// means no timeout. Zero and negative durations are rejected at
+	// validation time. Applies per invocation: a job with N rsync sources
+	// or N rclone remotes gets N independent timeouts.
+	MaxRuntime string `toml:"max_runtime"`
 
 	// Rsync fields
 	Sources     []string `toml:"sources"`
@@ -165,6 +172,21 @@ func (c *Config) ResolvedLogRetentionDays() int {
 		return DefaultLogRetentionDays
 	}
 	return *c.Defaults.LogRetentionDays
+}
+
+// MaxRuntimeDuration returns the parsed max_runtime value, or 0 when
+// the field is empty (meaning "no timeout"). Invalid values are rejected
+// during validation and never reach this method; the error branch here
+// is defensive.
+func (j Job) MaxRuntimeDuration() time.Duration {
+	if j.MaxRuntime == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(j.MaxRuntime)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // JobNames returns the names of all configured jobs in config order.
@@ -302,7 +324,7 @@ func validateRsyncJob(job Job) error {
 	if job.Destination == "" {
 		return fmt.Errorf("job %q: empty destination", job.Name)
 	}
-	return nil
+	return validateMaxRuntime(job)
 }
 
 func validateRcloneJob(job Job) error {
@@ -325,6 +347,24 @@ func validateRcloneJob(job Job) error {
 			return fmt.Errorf("job %q: duplicate remote %q", job.Name, r)
 		}
 		remoteSeen[r] = true
+	}
+	return validateMaxRuntime(job)
+}
+
+// validateMaxRuntime enforces that max_runtime, when set, parses to a
+// strictly positive time.Duration. An empty string means "no timeout"
+// and passes. Zero and negative values are rejected so users don't
+// accidentally configure "0s" expecting it to mean "no timeout".
+func validateMaxRuntime(job Job) error {
+	if job.MaxRuntime == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(job.MaxRuntime)
+	if err != nil {
+		return fmt.Errorf("job %q: invalid max_runtime %q: %w", job.Name, job.MaxRuntime, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("job %q: max_runtime must be > 0 (got %q); omit the field to disable the timeout", job.Name, job.MaxRuntime)
 	}
 	return nil
 }
