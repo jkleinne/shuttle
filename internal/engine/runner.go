@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -183,6 +184,9 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 	results := make([]JobResult, 0, len(remotes))
 	for _, remote := range remotes {
 		r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
+		// CleanupArchives deliberately uses the parent ctx, not the per-invocation
+		// jobCtx created inside runRcloneJob: a slow housekeeping pass shouldn't
+		// inherit the job's max_runtime and cause the cleanup to time out.
 		if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
 			r.logWarn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
 		}
@@ -214,6 +218,40 @@ func collectErrors(jobs []JobResult) []string {
 		}
 	}
 	return errs
+}
+
+// classifyExitStatus maps the combination of a context and a command run error
+// to the appropriate Status. Call after the command has terminated or failed
+// to start (both cmd.Start and cmd.Wait error paths).
+//
+// When ctx.Err() is context.DeadlineExceeded the job's per-invocation deadline
+// elapsed, so StatusTimedOut is returned regardless of runErr. When ctx.Err()
+// is context.Canceled the parent was cancelled (e.g. by a signal), which is
+// treated as an ordinary failure. context.Err() returns whichever terminal
+// state the context reached first and stays there, so the "deadline first then
+// parent cancel" case naturally resolves to StatusTimedOut without any extra
+// ordering logic.
+func classifyExitStatus(ctx context.Context, runErr error) Status {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return StatusTimedOut
+	}
+	if runErr != nil {
+		return StatusFailed
+	}
+	return StatusOK
+}
+
+// jobContext returns a context and cancel function for a single rsync or rclone
+// invocation. When maxRuntime is zero the parent context is returned unchanged
+// with a no-op cancel so callers can always defer cancel() safely. When
+// maxRuntime is positive a child context with the corresponding deadline is
+// returned; the caller is responsible for calling cancel to release the timer
+// resource.
+func jobContext(parent context.Context, maxRuntime time.Duration) (context.Context, context.CancelFunc) {
+	if maxRuntime <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, maxRuntime)
 }
 
 // runRsyncJob iterates each source in the job and calls rsync.
@@ -260,8 +298,16 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
 		r.logger.Debug(formatExec("rsync", args))
 
-		r.pw.StartJob(ctx, label)
-		result := r.rsync.Exec(ctx, args, r.pw.ProgressCallback())
+		// MaxRuntimeDuration returns (0, nil) for empty or (duration, nil) for
+		// validated input. The LoadBytes path rejects bad values at parse time,
+		// so discarding the error is safe here; callers bypassing validation
+		// (e.g. direct Job literals in tests) see that branch instead.
+		maxRuntime, _ := job.MaxRuntimeDuration()
+		jobCtx, cancel := jobContext(ctx, maxRuntime)
+
+		r.pw.StartJob(jobCtx, label)
+		result := r.rsync.Exec(jobCtx, args, r.pw.ProgressCallback())
+		cancel()
 		r.pw.FinishJob(result)
 		items = append(items, result)
 	}
@@ -328,8 +374,13 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
 	r.logger.Debug(formatExec("rclone", args))
 
-	r.pw.StartJob(ctx, label)
-	result := r.rclone.Exec(ctx, args, r.pw.ProgressCallback())
+	// See the rsync branch for why the error is discarded; same reasoning applies.
+	maxRuntime, _ := job.MaxRuntimeDuration()
+	jobCtx, cancel := jobContext(ctx, maxRuntime)
+	defer cancel()
+
+	r.pw.StartJob(jobCtx, label)
+	result := r.rclone.Exec(jobCtx, args, r.pw.ProgressCallback())
 	result.Name = destName
 	if destName == "" {
 		result.Name = "(prefix root)"

@@ -28,6 +28,10 @@ const (
 	// outcome: excluded from Summary.HasErrors() and rendered with its
 	// own dedicated symbol and tally segment.
 	StatusOptionalMissing Status = "optional_missing"
+	// StatusTimedOut means the job's per-invocation deadline elapsed before
+	// the external tool exited. It is a failure: Summary.HasErrors() returns
+	// true and the CLI exits with code 1.
+	StatusTimedOut Status = "timed_out"
 )
 
 // IsFailure reports whether a status represents a real failure that should
@@ -36,7 +40,7 @@ const (
 // on what "failure" means. StatusOptionalMissing is deliberately excluded:
 // it is a user-opted-in outcome for detachable sources, not a failure.
 func (s Status) IsFailure() bool {
-	return s == StatusFailed || s == StatusNotFound
+	return s == StatusFailed || s == StatusNotFound || s == StatusTimedOut
 }
 
 // TransferStats holds the quantitative output of a single rsync or rclone run.

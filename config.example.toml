@@ -79,3 +79,10 @@ mode = "copy"
 bwlimit = "2M"
 # optional = true          # skip without failure if the local source is absent
                             # (useful for detachable devices like external drives)
+# max_runtime = "2h"       # cap per-invocation wall-clock time; Shuttle kills
+                            # the tool and reports "timed out" (counts as a
+                            # failure, exit 1) if exceeded. Omit to disable.
+                            # Format: Go duration string (e.g. "30s", "5m",
+                            # "2h", "1h30m"). Applies per invocation: rsync
+                            # jobs with N sources and rclone jobs with N
+                            # remotes each get N independent timeouts.

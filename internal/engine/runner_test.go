@@ -3,12 +3,15 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
@@ -267,5 +270,205 @@ func TestRunRcloneJob_NotOptional_MissingLocalSource_MarksNotFound(t *testing.T)
 
 	if result.Items[0].Status != StatusNotFound {
 		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
+	}
+}
+
+func TestJobContext_NoTimeout_HasNoDeadline(t *testing.T) {
+	ctx, cancel := jobContext(context.Background(), 0)
+	defer cancel()
+
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Error("jobContext(parent, 0) must not set a deadline")
+	}
+}
+
+func TestJobContext_WithTimeout_SetsDeadline(t *testing.T) {
+	const timeout = 1 * time.Hour
+	before := time.Now()
+	ctx, cancel := jobContext(context.Background(), timeout)
+	defer cancel()
+
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		t.Fatal("jobContext(parent, 1h) must set a deadline")
+	}
+
+	// Deadline should be approximately 1 hour from now (allow 5s of drift).
+	wantMin := before.Add(timeout - 5*time.Second)
+	wantMax := before.Add(timeout + 5*time.Second)
+	if deadline.Before(wantMin) || deadline.After(wantMax) {
+		t.Errorf("deadline %v not in expected range [%v, %v]", deadline, wantMin, wantMax)
+	}
+}
+
+func TestRunRsyncJob_MaxRuntime_FiresAndReportsTimedOut(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	// Seed enough files that rsync cannot finish in 1ms.
+	for i := range 20 {
+		name := filepath.Join(src, fmt.Sprintf("file%d.dat", i))
+		if err := os.WriteFile(name, make([]byte, 1024*1024), 0o644); err != nil {
+			t.Fatalf("seeding source: %v", err)
+		}
+	}
+
+	job := config.Job{
+		Name:        "timeout-job",
+		Engine:      config.EngineRsync,
+		Sources:     []string{src},
+		Destination: t.TempDir(),
+		MaxRuntime:  "1ms",
+	}
+
+	result := r.runRsyncJob(context.Background(), job)
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusTimedOut)
+	}
+}
+
+func TestRunRsyncJob_ParentCanceled_ReturnsFailedNotTimedOut(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("seeding source: %v", err)
+	}
+
+	// Pre-cancel the parent context before running the job.
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCancel()
+
+	job := config.Job{
+		Name:        "canceled-job",
+		Engine:      config.EngineRsync,
+		Sources:     []string{src},
+		Destination: t.TempDir(),
+		MaxRuntime:  "1h", // long timeout so the cancellation comes from the parent
+	}
+
+	result := r.runRsyncJob(parentCtx, job)
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusFailed {
+		t.Errorf("Status = %q, want %q (parent cancel must not produce StatusTimedOut)", result.Items[0].Status, StatusFailed)
+	}
+}
+
+func TestRunRcloneJob_MaxRuntime_FiresAndReportsTimedOut(t *testing.T) {
+	// Symmetric to TestRunRsyncJob_MaxRuntime_FiresAndReportsTimedOut: pins
+	// that the jobContext wiring at the rclone call site flows the deadline
+	// through to RcloneExecutor and the resulting context error is classified
+	// as StatusTimedOut. The executor-level rclone timeout test covers the
+	// classification in isolation; this one covers the runner-level wiring.
+	if _, err := exec.LookPath("rclone"); err != nil {
+		t.Skip("rclone not found on PATH")
+	}
+
+	var termBuf bytes.Buffer
+	r := newTestRunner(t, &termBuf)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("seeding source: %v", err)
+	}
+
+	job := config.Job{
+		Name:    "timeout-rclone-job",
+		Engine:  config.EngineRclone,
+		Source:  src,
+		Remotes: []string{"any-remote"},
+		Mode:    config.ModeCopy,
+		// --config /dev/null avoids touching the developer's real rclone config
+		// during the test. The remote name is irrelevant because the 1ms
+		// deadline kills the process before rclone resolves the remote.
+		ExtraFlags: []string{"--config", "/dev/null"},
+		MaxRuntime: "1ms",
+	}
+
+	result := r.runRcloneJob(context.Background(), job, "any-remote", "2026-04-18_000000")
+
+	if len(result.Items) != 1 {
+		t.Fatalf("Items count = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Status != StatusTimedOut {
+		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusTimedOut)
+	}
+}
+
+func TestClassifyExitStatus(t *testing.T) {
+	someErr := errors.New("command failed")
+
+	// "deadline first then parent cancel": construct a context that has already
+	// exceeded its deadline, then cancel the parent. context.Err() returns
+	// whichever terminal state was reached first — DeadlineExceeded — and stays
+	// there regardless of the subsequent cancel.
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	pastDeadline := time.Now().Add(-1 * time.Second)
+	deadlineFirstCtx, deadlineFirstCancel := context.WithDeadline(parentCtx, pastDeadline)
+	// Trigger the parent cancel so both conditions are true, but deadline was first.
+	parentCancel()
+	defer deadlineFirstCancel()
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		runErr  error
+		want    Status
+	}{
+		{
+			name:   "ok context, nil error",
+			ctx:    context.Background(),
+			runErr: nil,
+			want:   StatusOK,
+		},
+		{
+			name:   "ok context, non-nil error",
+			ctx:    context.Background(),
+			runErr: someErr,
+			want:   StatusFailed,
+		},
+		{
+			name:   "deadline exceeded context, non-nil error",
+			ctx:    func() context.Context { c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second)); t.Cleanup(cancel); return c }(),
+			runErr: someErr,
+			want:   StatusTimedOut,
+		},
+		{
+			name:   "canceled context, non-nil error",
+			ctx:    func() context.Context { c, cancel := context.WithCancel(context.Background()); cancel(); return c }(),
+			runErr: someErr,
+			want:   StatusFailed,
+		},
+		{
+			name:   "deadline first then parent cancel",
+			ctx:    deadlineFirstCtx,
+			runErr: someErr,
+			want:   StatusTimedOut,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyExitStatus(tt.ctx, tt.runErr)
+			if got != tt.want {
+				t.Errorf("classifyExitStatus(...) = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
