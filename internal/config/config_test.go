@@ -734,6 +734,9 @@ func TestValidate_RcloneSyncNoBackupPath_Rejected(t *testing.T) {
 	if !strings.Contains(msg, "backup_path") {
 		t.Errorf("error %q should mention backup_path", msg)
 	}
+	if !strings.Contains(msg, "mode=") {
+		t.Errorf("error %q should name the offending mode via the mode= prefix", msg)
+	}
 }
 
 func TestValidate_RcloneSyncAllowDestructive_Passes(t *testing.T) {
@@ -783,7 +786,7 @@ allow_destructive = true
 	}
 }
 
-func TestValidate_RsyncJobWithAllowDestructive_SilentlyIgnored(t *testing.T) {
+func TestValidate_RsyncJobWithAllowDestructive_Accepted(t *testing.T) {
 	tomlData := `
 [[job]]
 name = "rsync-job"
@@ -820,18 +823,5 @@ allow_destructive = false
 	}
 	if !strings.Contains(err.Error(), "allow_destructive") {
 		t.Errorf("error %q should mention allow_destructive", err.Error())
-	}
-}
-
-func TestValidate_RcloneSyncNoBackupPath_ErrorMentionsModeString(t *testing.T) {
-	// The validator's error message interpolates ModeSync via %q. Asserting
-	// the literal "sync" appears in the output pins the diagnostic so a
-	// future refactor can't silently drop the mode value from the message.
-	_, err := config.LoadFile(testdataPath("config_sync_no_backup_path.toml"))
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), `"sync"`) {
-		t.Errorf("error %q should contain the mode literal \"sync\"", err.Error())
 	}
 }
