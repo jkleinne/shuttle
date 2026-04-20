@@ -800,3 +800,38 @@ allow_destructive = true
 		t.Error("AllowDestructive field should still unmarshal to true on rsync jobs")
 	}
 }
+
+func TestValidate_RcloneSyncExplicitFalse_Rejected(t *testing.T) {
+	// Pins that an explicit `allow_destructive = false` in TOML behaves
+	// identically to omitting the key. Guards against a future TOML
+	// library change that could distinguish zero-value from unset.
+	tomlData := `
+[[job]]
+name = "explicit-false-sync"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "sync"
+allow_destructive = false
+`
+	_, err := config.LoadBytes([]byte(tomlData))
+	if err == nil {
+		t.Fatal("expected error for sync with explicit allow_destructive=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "allow_destructive") {
+		t.Errorf("error %q should mention allow_destructive", err.Error())
+	}
+}
+
+func TestValidate_RcloneSyncNoBackupPath_ErrorMentionsModeString(t *testing.T) {
+	// The validator's error message interpolates ModeSync via %q. Asserting
+	// the literal "sync" appears in the output pins the diagnostic so a
+	// future refactor can't silently drop the mode value from the message.
+	_, err := config.LoadFile(testdataPath("config_sync_no_backup_path.toml"))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `"sync"`) {
+		t.Errorf("error %q should contain the mode literal \"sync\"", err.Error())
+	}
+}
