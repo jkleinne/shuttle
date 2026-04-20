@@ -390,7 +390,7 @@ func validateDestructiveSync(job Job) error {
 		return nil
 	}
 	return fmt.Errorf(
-		`job %q: mode=%q without backup_path permanently deletes remote files when their local counterparts are removed; set backup_path to archive deletions, or set allow_destructive=true to acknowledge this`,
+		`job %q: mode=%q without backup_path permanently deletes remote files when their local counterparts are removed. Set backup_path to archive deletions, or set allow_destructive=true to acknowledge this.`,
 		job.Name, ModeSync,
 	)
 }
