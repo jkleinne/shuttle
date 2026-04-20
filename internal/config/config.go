@@ -109,8 +109,8 @@ type Job struct {
 	// local counterparts are removed. Required for that configuration to
 	// pass validation. Ignored on all other configurations (copy mode,
 	// sync with backup_path set, rsync jobs).
-	AllowDestructive bool     `toml:"allow_destructive"`
-	FilterFile       string   `toml:"filter_file"`
+	AllowDestructive bool   `toml:"allow_destructive"`
+	FilterFile       string `toml:"filter_file"`
 
 	// Rclone per-job tuning overrides
 	Transfers       int    `toml:"transfers"`
