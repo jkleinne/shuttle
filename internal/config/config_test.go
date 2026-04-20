@@ -699,3 +699,104 @@ max_runtime = "-1h"
 		t.Errorf("error %q should mention job name", err.Error())
 	}
 }
+
+func TestValidate_RcloneSyncWithBackupPath_Passes(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "docs-safe"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "sync"
+backup_path = "_archive"
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Jobs[0].AllowDestructive {
+		t.Error("AllowDestructive = true, want false (zero value)")
+	}
+}
+
+func TestValidate_RcloneSyncNoBackupPath_Rejected(t *testing.T) {
+	_, err := config.LoadFile(testdataPath("config_sync_no_backup_path.toml"))
+	if err == nil {
+		t.Fatal("expected error for sync without backup_path or opt-in, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unsafe-sync") {
+		t.Errorf("error %q should mention the job name", msg)
+	}
+	if !strings.Contains(msg, "allow_destructive") {
+		t.Errorf("error %q should mention allow_destructive", msg)
+	}
+	if !strings.Contains(msg, "backup_path") {
+		t.Errorf("error %q should mention backup_path", msg)
+	}
+}
+
+func TestValidate_RcloneSyncAllowDestructive_Passes(t *testing.T) {
+	cfg, err := config.LoadFile(testdataPath("config_sync_allow_destructive.toml"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Jobs[0].AllowDestructive {
+		t.Error("AllowDestructive = false, want true")
+	}
+}
+
+func TestValidate_RcloneCopyNoBackupPath_Passes(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "copy-job"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "copy"
+`
+	if _, err := config.LoadBytes([]byte(tomlData)); err != nil {
+		t.Errorf("copy mode with empty backup_path should pass, got: %v", err)
+	}
+}
+
+func TestValidate_RcloneSyncWithBothBackupPathAndAllowDestructive_Passes(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "belt-and-suspenders"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "sync"
+backup_path = "_archive"
+allow_destructive = true
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("sync with both backup_path and allow_destructive should pass, got: %v", err)
+	}
+	if !cfg.Jobs[0].AllowDestructive {
+		t.Error("AllowDestructive = false, want true")
+	}
+	if cfg.Jobs[0].BackupPath == "" {
+		t.Error("BackupPath should be set")
+	}
+}
+
+func TestValidate_RsyncJobWithAllowDestructive_SilentlyIgnored(t *testing.T) {
+	tomlData := `
+[[job]]
+name = "rsync-job"
+engine = "rsync"
+sources = ["/tmp/src"]
+destination = "/tmp/dst"
+allow_destructive = true
+`
+	cfg, err := config.LoadBytes([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("allow_destructive on rsync job should be silently accepted, got: %v", err)
+	}
+	if !cfg.Jobs[0].AllowDestructive {
+		t.Error("AllowDestructive field should still unmarshal to true on rsync jobs")
+	}
+}

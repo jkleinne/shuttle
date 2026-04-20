@@ -104,7 +104,13 @@ type Job struct {
 	Mode                string   `toml:"mode"`
 	BackupPath          string   `toml:"backup_path"`
 	BackupRetentionDays int      `toml:"backup_retention_days"`
-	FilterFile          string   `toml:"filter_file"`
+	// AllowDestructive acknowledges that an rclone job with mode="sync"
+	// and empty backup_path permanently deletes remote files when their
+	// local counterparts are removed. Required for that configuration to
+	// pass validation. Ignored on all other configurations (copy mode,
+	// sync with backup_path set, rsync jobs).
+	AllowDestructive bool     `toml:"allow_destructive"`
+	FilterFile       string   `toml:"filter_file"`
 
 	// Rclone per-job tuning overrides
 	Transfers       int    `toml:"transfers"`
@@ -346,6 +352,9 @@ func validateRcloneJob(job Job) error {
 		}
 		remoteSeen[r] = true
 	}
+	if err := validateDestructiveSync(job); err != nil {
+		return err
+	}
 	return validateMaxRuntime(job)
 }
 
@@ -368,4 +377,20 @@ func validateMaxRuntime(job Job) error {
 		return fmt.Errorf("job %q: max_runtime must be positive (got %q)", job.Name, job.MaxRuntime)
 	}
 	return nil
+}
+
+// validateDestructiveSync rejects rclone sync jobs that would permanently
+// delete remote files without archival. Passes when mode is not "sync",
+// when backup_path is set (deletions are archived), or when the job
+// acknowledges the risk via AllowDestructive=true. The error message names
+// both resolution paths so the user can fix the config without consulting
+// documentation.
+func validateDestructiveSync(job Job) error {
+	if job.Mode != ModeSync || job.BackupPath != "" || job.AllowDestructive {
+		return nil
+	}
+	return fmt.Errorf(
+		`job %q: mode=%q without backup_path permanently deletes remote files when their local counterparts are removed; set backup_path to archive deletions, or set allow_destructive=true to acknowledge this`,
+		job.Name, ModeSync,
+	)
 }
