@@ -1,0 +1,7 @@
+[[job]]
+name = "intentional-destructive"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "sync"
+allow_destructive = true

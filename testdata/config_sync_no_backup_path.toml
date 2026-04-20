@@ -1,0 +1,6 @@
+[[job]]
+name = "unsafe-sync"
+engine = "rclone"
+source = "/tmp/docs"
+remotes = ["gdrive"]
+mode = "sync"

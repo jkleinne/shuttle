@@ -60,6 +60,10 @@ delete = true
 
 # Rclone job: sync documents to multiple cloud remotes
 # Remotes must already be configured in rclone (run `rclone config`).
+# Note: sync mode deletes remote files when local files are removed.
+# Either set backup_path (shown here) to archive deletions for later
+# recovery, or set allow_destructive = true to opt in to permanent
+# deletion.
 [[job]]
 name = "documents-to-cloud"
 engine = "rclone"
@@ -68,6 +72,9 @@ remotes = ["my_gdrive", "my_s3"]
 mode = "sync"
 backup_path = "_archive"
 backup_retention_days = 365
+# allow_destructive = true   # required only if backup_path is empty;
+                             # acknowledges that deleted local files will
+                             # be permanently removed from the remote.
 
 # Rclone job: copy media (bandwidth-limited)
 [[job]]

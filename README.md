@@ -190,6 +190,7 @@ Each `[[job]]` entry defines one sync operation.
 | `mode` | string | yes | `"copy"` (add files) or `"sync"` (mirror, may delete) |
 | `backup_path` | string | no | Remote path prefix for archived deleted files (sync mode only) |
 | `backup_retention_days` | int | no | Days to keep archived files before cleanup |
+| `allow_destructive` | bool | no | Required when `mode = "sync"` and `backup_path` is empty. Acknowledges that deleted local files will be permanently removed from the remote on sync. Default: `false`. |
 | `filter_file` | string | no | Per-job filter file (overrides default) |
 
 Rclone jobs also accept all tuning fields from `[defaults.rclone]` as per-job overrides (`transfers`, `bwlimit`, etc.).
