@@ -288,3 +288,55 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 	// Keep run1 alive until after run2 runs so its lock fd is not finalized early.
 	_ = run1
 }
+
+func TestPipeline_RcloneMultiRemote_ExpandsAdjacently(t *testing.T) {
+	skipIfNoRclone(t)
+
+	// Two local-type remotes in a temp rclone config, written inline rather than
+	// extending writeRcloneConfig (which would force its existing testlocal
+	// callers to keep compiling — needless churn for a single test).
+	rcloneConf := filepath.Join(t.TempDir(), "rclone.conf")
+	body := "[testlocal]\ntype = local\n\n[testlocal2]\ntype = local\n"
+	if err := os.WriteFile(rcloneConf, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing rclone config: %v", err)
+	}
+	t.Setenv("RCLONE_CONFIG", rcloneConf)
+
+	src := t.TempDir()
+	seedFile(t, src, "cloud.txt", "cloud")
+	dst := t.TempDir()
+
+	cfg := &config.Config{
+		Jobs: []config.Job{
+			{
+				Name:        "cloud-sync",
+				Engine:      config.EngineRclone,
+				Source:      src,
+				Destination: dst,
+				Remotes:     []string{"testlocal", "testlocal2"},
+				Mode:        config.ModeCopy,
+			},
+		},
+	}
+
+	summary := runPipeline(t, cfg, filepath.Join(t.TempDir(), "config.toml"), RunOptions{})
+
+	if len(summary.Jobs) != 2 {
+		t.Fatalf("len(Jobs) = %d, want 2 (one JobResult per remote)", len(summary.Jobs))
+	}
+	// Both results belong to the same job and are adjacent in remote order.
+	if summary.Jobs[0].Name != "cloud-sync" || summary.Jobs[1].Name != "cloud-sync" {
+		t.Errorf("job names = [%q, %q], want both \"cloud-sync\"", summary.Jobs[0].Name, summary.Jobs[1].Name)
+	}
+	if summary.Jobs[0].Remote != "testlocal" || summary.Jobs[1].Remote != "testlocal2" {
+		t.Errorf("remotes = [%q, %q], want [testlocal, testlocal2]", summary.Jobs[0].Remote, summary.Jobs[1].Remote)
+	}
+	for _, job := range summary.Jobs {
+		if got := job.Items[0].Status; got != StatusOK {
+			t.Errorf("remote %q status = %q, want %q", job.Remote, got, StatusOK)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dst, "cloud.txt")); err != nil {
+		t.Errorf("rclone file should have landed at <dst>/cloud.txt: %v", err)
+	}
+}
