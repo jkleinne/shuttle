@@ -50,3 +50,24 @@ func TestReport_HasFailures(t *testing.T) {
 		t.Error("HasFailures = false, want true (has fail)")
 	}
 }
+
+func TestRenderReport_Color_WrapsSymbolInANSI(t *testing.T) {
+	var buf bytes.Buffer
+	RenderReport(&buf, Report{Checks: []CheckResult{{Name: "rsync", Level: CheckOK, Detail: "3.2.7"}}}, true)
+	out := buf.String()
+	if !strings.Contains(out, ansiGreen+symbolOK+ansiReset) {
+		t.Errorf("colored output should wrap the OK glyph in green ANSI codes; got %q", out)
+	}
+}
+
+func TestRenderReport_EmptyReport_RendersNoChecksRun(t *testing.T) {
+	var buf bytes.Buffer
+	RenderReport(&buf, Report{}, false)
+	out := buf.String()
+	if !strings.Contains(out, "shuttle doctor") {
+		t.Errorf("empty report should still render the header; got %q", out)
+	}
+	if !strings.Contains(out, "no checks run") {
+		t.Errorf("empty report should render the no-checks tally; got %q", out)
+	}
+}
