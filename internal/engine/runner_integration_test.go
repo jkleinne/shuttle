@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jkleinne/shuttle/internal/config"
@@ -134,4 +135,156 @@ func TestPipeline_MultiEngine_AllSucceed(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(rcloneDst, "cloud.txt")); err != nil {
 		t.Errorf("rclone file not at expected path <dst>/cloud.txt: %v", err)
 	}
+}
+
+func TestPipeline_PartialFailure_ContinuesAndRecordsError(t *testing.T) {
+	skipIfNoRsync(t)
+
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	healthySrc := seedDir(t, t.TempDir(), "data", "keep.txt", "keep")
+	healthyDst := t.TempDir()
+
+	cfg := &config.Config{
+		Defaults: rsyncDefaults(),
+		Jobs: []config.Job{
+			{Name: "broken", Engine: config.EngineRsync, Sources: []string{missing}, Destination: t.TempDir()},
+			{Name: "healthy", Engine: config.EngineRsync, Sources: []string{healthySrc}, Destination: healthyDst},
+		},
+	}
+
+	summary := runPipeline(t, cfg, filepath.Join(t.TempDir(), "config.toml"), RunOptions{})
+
+	if len(summary.Jobs) != 2 {
+		t.Fatalf("len(Jobs) = %d, want 2", len(summary.Jobs))
+	}
+	// Jobs are dispatched in config order: broken first, healthy second.
+	if got := summary.Jobs[0].Items[0].Status; got != StatusNotFound {
+		t.Errorf("broken status = %q, want %q", got, StatusNotFound)
+	}
+	if got := summary.Jobs[1].Items[0].Status; got != StatusOK {
+		t.Errorf("healthy status = %q, want %q (pipeline must continue past the failure)", got, StatusOK)
+	}
+	if !summary.HasErrors() {
+		t.Error("HasErrors() = false, want true")
+	}
+	if len(summary.Errors) != 1 {
+		t.Fatalf("len(Errors) = %d, want 1 (Errors=%v)", len(summary.Errors), summary.Errors)
+	}
+	if !strings.Contains(summary.Errors[0], "broken") {
+		t.Errorf("Errors[0] = %q, want it to name the 'broken' job", summary.Errors[0])
+	}
+	if _, err := os.Stat(filepath.Join(healthyDst, "data", "keep.txt")); err != nil {
+		t.Errorf("healthy file should have landed: %v", err)
+	}
+}
+
+func TestPipeline_DryRun_WritesNothing(t *testing.T) {
+	skipIfNoRsync(t)
+
+	src := seedDir(t, t.TempDir(), "data", "file.txt", "content")
+	dst := t.TempDir()
+
+	cfg := &config.Config{
+		Defaults: rsyncDefaults(),
+		Jobs: []config.Job{
+			{Name: "dry", Engine: config.EngineRsync, Sources: []string{src}, Destination: dst},
+		},
+	}
+
+	summary := runPipeline(t, cfg, filepath.Join(t.TempDir(), "config.toml"), RunOptions{DryRun: true})
+
+	if !summary.DryRun {
+		t.Error("Summary.DryRun = false, want true")
+	}
+	if got := summary.Jobs[0].Items[0].Status; got != StatusOK {
+		t.Errorf("status = %q, want %q", got, StatusOK)
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("reading dst: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("dst not empty after dry-run: %v", entries)
+	}
+}
+
+func TestPipeline_OnlyFilter_SkipsUnselectedJob(t *testing.T) {
+	skipIfNoRsync(t)
+
+	srcA := seedDir(t, t.TempDir(), "data", "a.txt", "a")
+	dstA := t.TempDir()
+
+	srcB := t.TempDir()
+	seedFile(t, srcB, "b.txt", "b")
+	dstB := t.TempDir()
+
+	cfg := &config.Config{
+		Defaults: rsyncDefaults(),
+		Jobs: []config.Job{
+			{Name: "job-a", Engine: config.EngineRsync, Sources: []string{srcA}, Destination: dstA},
+			{Name: "job-b", Engine: config.EngineRsync, Sources: []string{srcB}, Destination: dstB},
+		},
+	}
+
+	summary := runPipeline(t, cfg, filepath.Join(t.TempDir(), "config.toml"), RunOptions{OnlyJobs: []string{"job-a"}})
+
+	if len(summary.Jobs) != 2 {
+		t.Fatalf("len(Jobs) = %d, want 2", len(summary.Jobs))
+	}
+	jobB := summary.Jobs[1]
+	if jobB.Name != "job-b" {
+		t.Fatalf("Jobs[1].Name = %q, want job-b", jobB.Name)
+	}
+	if len(jobB.Items) != 1 || jobB.Items[0].Status != StatusSkipped {
+		t.Errorf("job-b items = %+v, want exactly one StatusSkipped", jobB.Items)
+	}
+	if summary.HasErrors() {
+		t.Errorf("HasErrors() = true, want false (skip is not a failure; Errors=%v)", summary.Errors)
+	}
+	entries, err := os.ReadDir(dstB)
+	if err != nil {
+		t.Fatalf("reading dstB: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("job-b dest not empty (job-b should have been skipped): %v", entries)
+	}
+	if _, err := os.Stat(filepath.Join(dstA, "data", "a.txt")); err != nil {
+		t.Errorf("job-a file should have landed: %v", err)
+	}
+}
+
+func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
+	// Empty-jobs config: checkPrerequisites needs no external tool, so this test
+	// runs anywhere. run1 acquires the per-config flock and holds it open
+	// (released only at process exit); a second Run on the same configPath must
+	// be rejected. Calls NewRunner/Run directly rather than via runPipeline,
+	// which would t.Fatalf on the expected error.
+	cfg := &config.Config{}
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+
+	newRunner := func(tag string) *Runner {
+		logFile := filepath.Join(t.TempDir(), tag+".log")
+		logger, err := log.NewWithWriter(io.Discard, logFile, false, log.VerbosityNormal)
+		if err != nil {
+			t.Fatalf("creating logger %s: %v", tag, err)
+		}
+		return NewRunner(cfg, configPath, logger, NewProgressWriter(io.Discard, false, false), false, logFile)
+	}
+
+	run1 := newRunner("run1")
+	if _, err := run1.Run(context.Background(), RunOptions{}); err != nil {
+		t.Fatalf("run1.Run returned error: %v", err)
+	}
+
+	run2 := newRunner("run2")
+	_, err := run2.Run(context.Background(), RunOptions{})
+	if err == nil {
+		t.Fatal("run2.Run returned nil, want a lock-contention error")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "already running")
+	}
+
+	// Keep run1 alive until after run2 runs so its lock fd is not finalized early.
+	_ = run1
 }
