@@ -256,7 +256,7 @@ func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
 
 	var warned bool
 	for _, c := range rep.Checks {
-		if c.Name == "remotes" && c.Level == CheckWarn {
+		if c.Name == checkNameRemotes && c.Level == CheckWarn {
 			warned = true
 		}
 		if c.Name == "remote" {

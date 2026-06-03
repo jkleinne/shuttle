@@ -29,6 +29,11 @@ const checkNameRemote = "remote"
 // checkNameFilterFile is the fixed label for filter-file check results.
 const checkNameFilterFile = "filter file"
 
+// checkNameRemotes is the fixed label for the aggregate WARN emitted when the
+// rclone remote list cannot be read (plural, distinct from the per-remote
+// checkNameRemote rows it replaces).
+const checkNameRemotes = "remotes"
+
 // CheckLevel is the severity of a single diagnostic check.
 type CheckLevel int
 
@@ -283,7 +288,7 @@ func remoteChecks(ctx context.Context, cfg *config.Config) []CheckResult {
 	defined, err := listRcloneRemotes(ctx)
 	if err != nil {
 		return []CheckResult{{
-			Name:   "remotes",
+			Name:   checkNameRemotes,
 			Level:  CheckWarn,
 			Detail: "could not read rclone remotes (encrypted config? set RCLONE_CONFIG_PASS)",
 		}}
