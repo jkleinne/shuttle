@@ -1,15 +1,26 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os/exec"
 	"strings"
+
+	"github.com/jkleinne/shuttle/internal/config"
 )
 
 // symbolWarn is the doctor-only warning glyph. The ✓/✗ glyphs are shared with
 // render.go via symbolOK/symbolFailed; WARN has no analog there because the
 // sync Status type has no warning state.
 const symbolWarn = "⚠"
+
+// checkNameConfig is the fixed label for the config check. Extracted as a
+// constant to satisfy goconst (the string appears in multiple CheckResult
+// literals) and to make future refactors consistent.
+const checkNameConfig = "config"
 
 // CheckLevel is the severity of a single diagnostic check.
 type CheckLevel int
@@ -111,4 +122,136 @@ func doctorTally(ok, warn, fail int) string {
 		return "no checks run"
 	}
 	return strings.Join(parts, " · ")
+}
+
+// ConfigStatus is the resolved config-load outcome handed to Diagnose. Config
+// file reads happen at the cmd boundary (matching run/validate); Diagnose only
+// classifies the outcome. Grouped into a struct so Diagnose stays under the
+// project's 3-parameter threshold.
+type ConfigStatus struct {
+	Path     string         // resolved config path, for display
+	Cfg      *config.Config // nil when LoadErr != nil
+	LoadErr  error          // nil on success; errors.Is(_, fs.ErrNotExist) marks "missing"
+	Explicit bool           // path supplied via --config or $SHUTTLE_CONFIG
+}
+
+// Diagnose runs all checks and returns the report. It never returns an error;
+// every problem is recorded as a CheckResult. ctx cancels the (fast, local)
+// external-tool invocations on signal.
+func Diagnose(ctx context.Context, cs ConfigStatus) Report {
+	usesRsync, usesRclone := enginesUsed(cs.Cfg)
+
+	// Absence severity: FAIL when the loaded config uses that engine (the tool
+	// is required), WARN when not (tool is missing but not needed right now).
+	rsyncAbsent := CheckWarn
+	if usesRsync {
+		rsyncAbsent = CheckFail
+	}
+	rcloneAbsent := CheckWarn
+	if usesRclone {
+		rcloneAbsent = CheckFail
+	}
+
+	checks := []CheckResult{
+		toolCheck(ctx, "rsync", rsyncAbsent, rsyncVersion),
+		toolCheck(ctx, "rclone", rcloneAbsent, rcloneVersion),
+		classifyConfig(cs),
+	}
+	return Report{Checks: checks}
+}
+
+// enginesUsed reports whether the loaded config has any rsync / rclone jobs.
+// Both are false when cfg is nil (config failed to load), so a missing tool is
+// then a WARN rather than a FAIL.
+func enginesUsed(cfg *config.Config) (usesRsync, usesRclone bool) {
+	if cfg == nil {
+		return false, false
+	}
+	for _, j := range cfg.Jobs {
+		switch j.Engine {
+		case config.EngineRsync:
+			usesRsync = true
+		case config.EngineRclone:
+			usesRclone = true
+		}
+	}
+	return usesRsync, usesRclone
+}
+
+// classifyConfig turns the config-load outcome into a single check. Pure logic
+// over ConfigStatus (no I/O).
+func classifyConfig(cs ConfigStatus) CheckResult {
+	switch {
+	case cs.LoadErr == nil:
+		return CheckResult{Name: checkNameConfig, Level: CheckOK, Detail: cs.Path}
+	case errors.Is(cs.LoadErr, fs.ErrNotExist):
+		if cs.Explicit {
+			return CheckResult{Name: checkNameConfig, Level: CheckFail, Detail: cs.Path + " — not found"}
+		}
+		return CheckResult{Name: checkNameConfig, Level: CheckWarn, Detail: cs.Path + " — no config file (create one, then `shuttle validate`)"}
+	default:
+		return CheckResult{Name: checkNameConfig, Level: CheckFail, Detail: oneLine(cs.LoadErr.Error())}
+	}
+}
+
+// toolCheck reports whether an external tool is on PATH. absentLevel is the
+// severity to use when the tool is missing (CheckFail when the loaded config
+// uses this engine, CheckWarn when it does not). When present, the version
+// func supplies the detail.
+func toolCheck(ctx context.Context, name string, absentLevel CheckLevel, version func(context.Context) string) CheckResult {
+	if _, err := exec.LookPath(name); err != nil {
+		detail := "not found on PATH"
+		if absentLevel == CheckWarn {
+			detail = "not found on PATH (no " + name + " jobs configured)"
+		}
+		return CheckResult{Name: name, Level: absentLevel, Detail: detail}
+	}
+	return CheckResult{Name: name, Level: CheckOK, Detail: version(ctx)}
+}
+
+// rsyncVersion returns the rsync version token, or "installed" if it cannot be
+// determined. Example first line: "rsync  version 3.2.7  protocol version 31".
+func rsyncVersion(ctx context.Context) string {
+	line, err := commandFirstLine(ctx, "rsync", "--version")
+	if err != nil {
+		return "installed"
+	}
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if f == "version" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return line
+}
+
+// rcloneVersion returns the rclone version token, or "installed" if it cannot
+// be determined. Example first line: "rclone v1.66.0".
+func rcloneVersion(ctx context.Context) string {
+	line, err := commandFirstLine(ctx, "rclone", "version")
+	if err != nil {
+		return "installed"
+	}
+	if fields := strings.Fields(line); len(fields) >= 2 {
+		return fields[1]
+	}
+	return line
+}
+
+// commandFirstLine runs name+args and returns the trimmed first line of stdout.
+func commandFirstLine(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return oneLine(string(out)), nil
+}
+
+// oneLine returns the first line of s, trimmed. Used to keep check details to a
+// single line (and to avoid dumping multi-line tool output).
+func oneLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
