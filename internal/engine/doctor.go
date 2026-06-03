@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -21,6 +22,9 @@ const symbolWarn = "⚠"
 // constant to satisfy goconst (the string appears in multiple CheckResult
 // literals) and to make future refactors consistent.
 const checkNameConfig = "config"
+
+// checkNameRemote is the fixed label for per-remote check results.
+const checkNameRemote = "remote"
 
 // CheckLevel is the severity of a single diagnostic check.
 type CheckLevel int
@@ -157,6 +161,10 @@ func Diagnose(ctx context.Context, cs ConfigStatus) Report {
 		toolCheck(ctx, "rclone", rcloneAbsent, rcloneVersion),
 		classifyConfig(cs),
 	}
+	if cs.Cfg != nil {
+		checks = append(checks, remoteChecks(ctx, cs.Cfg)...)
+		checks = append(checks, filterFileChecks(cs.Cfg)...)
+	}
 	return Report{Checks: checks}
 }
 
@@ -254,4 +262,95 @@ func oneLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// remoteChecks verifies each configured rclone remote name exists in the user's
+// rclone config. Skipped when there are no rclone remotes or rclone is absent.
+// When the remote list cannot be read (e.g. an encrypted config without
+// RCLONE_CONFIG_PASS), a single WARN is returned and per-remote checks are
+// skipped — a fixable setup gap, not a hard failure.
+func remoteChecks(ctx context.Context, cfg *config.Config) []CheckResult {
+	names := cfg.AllRemoteNames()
+	if len(names) == 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("rclone"); err != nil {
+		return nil // rclone-missing is already reported by toolCheck
+	}
+	defined, err := listRcloneRemotes(ctx)
+	if err != nil {
+		return []CheckResult{{
+			Name:   "remotes",
+			Level:  CheckWarn,
+			Detail: "could not read rclone remotes (encrypted config? supply the config password)",
+		}}
+	}
+	checks := make([]CheckResult, 0, len(names))
+	for _, n := range names {
+		if defined[n] {
+			checks = append(checks, CheckResult{Name: checkNameRemote, Level: CheckOK, Detail: n})
+		} else {
+			checks = append(checks, CheckResult{Name: checkNameRemote, Level: CheckFail, Detail: n + " — not found in rclone config"})
+		}
+	}
+	return checks
+}
+
+// listRcloneRemotes returns the set of remote names defined in the user's rclone
+// config. --ask-password=false makes rclone fail fast instead of prompting on
+// stdin when the config is encrypted and no password is available.
+func listRcloneRemotes(ctx context.Context) (map[string]bool, error) {
+	out, err := exec.CommandContext(ctx, "rclone", "listremotes", "--ask-password=false").Output()
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		// listremotes prints one "name:" per line.
+		name := strings.TrimSuffix(strings.TrimSpace(line), ":")
+		if name != "" {
+			set[name] = true
+		}
+	}
+	return set, nil
+}
+
+// filterFileChecks stats each unique rclone filter file referenced by the config.
+func filterFileChecks(cfg *config.Config) []CheckResult {
+	var checks []CheckResult
+	for _, ff := range rcloneFilterFiles(cfg) {
+		if _, err := os.Stat(ff); err != nil {
+			checks = append(checks, CheckResult{Name: "filter file", Level: CheckFail, Detail: ff + " — not found"})
+		} else {
+			checks = append(checks, CheckResult{Name: "filter file", Level: CheckOK, Detail: ff})
+		}
+	}
+	return checks
+}
+
+// rcloneFilterFiles returns the deduplicated filter-file paths referenced by all
+// rclone jobs (default plus per-job overrides), in first-seen order. Unlike
+// Runner.collectFilterFiles this is not run-filter-aware: doctor checks every
+// configured job.
+func rcloneFilterFiles(cfg *config.Config) []string {
+	defaultFilter := ""
+	if cfg.Defaults != nil && cfg.Defaults.Rclone != nil {
+		defaultFilter = cfg.Defaults.Rclone.FilterFile
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, job := range cfg.Jobs {
+		if job.Engine != config.EngineRclone {
+			continue
+		}
+		ff := job.FilterFile
+		if ff == "" {
+			ff = defaultFilter
+		}
+		if ff != "" && !seen[ff] {
+			seen[ff] = true
+			files = append(files, ff)
+		}
+	}
+	return files
 }

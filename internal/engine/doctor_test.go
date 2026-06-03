@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -149,5 +151,121 @@ func TestDiagnose_ToolMissing_SeverityByNeed(t *testing.T) {
 	}
 	if findCheck(t, rep, "rclone").Level != CheckWarn {
 		t.Error("rclone unused + missing: want WARN")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Remote and filter-file checks (Task 3)
+// ---------------------------------------------------------------------------
+
+func findRemote(t *testing.T, rep Report, remote string) CheckResult {
+	t.Helper()
+	for _, c := range rep.Checks {
+		if c.Name == "remote" && strings.HasPrefix(c.Detail, remote) {
+			return c
+		}
+	}
+	t.Fatalf("no remote check for %q", remote)
+	return CheckResult{}
+}
+
+func TestDiagnose_RemoteDefined_OK(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if got := findRemote(t, rep, "testlocal"); got.Level != CheckOK {
+		t.Errorf("defined remote: want OK, got %v (%s)", got.Level, got.Detail)
+	}
+}
+
+func TestDiagnose_RemoteUndefined_Fails(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"ghost"}, Mode: config.ModeCopy},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if findRemote(t, rep, "ghost").Level != CheckFail {
+		t.Error("undefined remote: want FAIL")
+	}
+}
+
+func TestDiagnose_FilterFileMissing_Fails(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: "/no/such/filter.txt"},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if findCheck(t, rep, "filter file").Level != CheckFail {
+		t.Error("missing filter file: want FAIL")
+	}
+}
+
+func TestDiagnose_FilterFilePresent_OK(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	ff := filepath.Join(t.TempDir(), "filter.txt")
+	if err := os.WriteFile(ff, []byte("- *.tmp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: ff},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if findCheck(t, rep, "filter file").Level != CheckOK {
+		t.Error("present filter file: want OK")
+	}
+}
+
+// Security: a remote name with shell metacharacters must be compared, never run.
+func TestDiagnose_RemoteNameWithMetachars_NotExecuted(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	tmp := t.TempDir()
+	evil := "x; touch " + filepath.Join(tmp, "pwned")
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{evil}, Mode: config.ModeCopy},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if findRemote(t, rep, evil).Level != CheckFail {
+		t.Error("metachar remote should be reported not-found")
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "pwned")); err == nil {
+		t.Fatal("command injection: side-effect file was created")
+	}
+}
+
+// Security: when rclone cannot read its config (here: an encrypted-marker
+// config that rclone rejects under --ask-password=false), doctor reports a WARN
+// (not a hang, not a FAIL), skips per-remote checks, and leaks no secret. The
+// malformed encrypted blob is what makes listremotes exit non-zero; the empty
+// RCLONE_CONFIG_PASS just guarantees no ambient password is in play.
+func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
+	confPath := filepath.Join(t.TempDir(), "rclone.conf")
+	encrypted := "# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\nc29tZWdhcmJhZ2VlbmNyeXB0ZWRibG9i\n"
+	if err := os.WriteFile(confPath, []byte(encrypted), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RCLONE_CONFIG", confPath)
+	t.Setenv("RCLONE_CONFIG_PASS", "")
+
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+
+	var warned bool
+	for _, c := range rep.Checks {
+		if c.Name == "remotes" && c.Level == CheckWarn {
+			warned = true
+		}
+		if c.Name == "remote" {
+			t.Errorf("per-remote check %q should be skipped on read failure", c.Detail)
+		}
+		if strings.Contains(c.Detail, "RCLONE_CONFIG_PASS") {
+			t.Fatalf("check detail leaked secret reference: %q", c.Detail)
+		}
+	}
+	if !warned {
+		t.Error("encrypted config without password: want a 'remotes' WARN")
 	}
 }
