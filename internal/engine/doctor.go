@@ -226,7 +226,10 @@ func toolCheck(ctx context.Context, name string, absentLevel CheckLevel, version
 	}
 	detail, err := version(ctx)
 	if err != nil {
-		return CheckResult{Name: name, Level: CheckWarn, Detail: "on PATH but version check failed"}
+		// Surface the cause (e.g. "exit status 3") so the user can act; the
+		// error never carries the tool's stderr because commandFirstLine uses
+		// .Output(), which routes stderr to (*exec.ExitError).Stderr, not here.
+		return CheckResult{Name: name, Level: CheckWarn, Detail: "on PATH but version check failed: " + oneLine(err.Error())}
 	}
 	return CheckResult{Name: name, Level: CheckOK, Detail: detail}
 }
