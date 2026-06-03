@@ -197,7 +197,7 @@ func TestDiagnose_FilterFileMissing_Fails(t *testing.T) {
 		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: "/no/such/filter.txt"},
 	}}
 	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
-	if findCheck(t, rep, "filter file").Level != CheckFail {
+	if findCheck(t, rep, checkNameFilterFile).Level != CheckFail {
 		t.Error("missing filter file: want FAIL")
 	}
 }
@@ -212,7 +212,7 @@ func TestDiagnose_FilterFilePresent_OK(t *testing.T) {
 		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: ff},
 	}}
 	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
-	if findCheck(t, rep, "filter file").Level != CheckOK {
+	if findCheck(t, rep, checkNameFilterFile).Level != CheckOK {
 		t.Error("present filter file: want OK")
 	}
 }
@@ -268,5 +268,63 @@ func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
 	}
 	if !warned {
 		t.Error("unreadable encrypted config: want a 'remotes' WARN")
+	}
+}
+
+func TestDiagnose_FilterFile_DefaultInheritedWhenJobHasNone(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	ff := filepath.Join(t.TempDir(), "default-filter.txt")
+	if err := os.WriteFile(ff, []byte("- *.tmp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The job sets no per-job filter; the [defaults.rclone].filter_file applies.
+	cfg := &config.Config{
+		Defaults: &config.Defaults{Rclone: &config.RcloneDefaults{FilterFile: ff}},
+		Jobs: []config.Job{
+			{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy},
+		},
+	}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	got := findCheck(t, rep, checkNameFilterFile)
+	if got.Level != CheckOK || got.Detail != ff {
+		t.Errorf("default filter inheritance: want OK for %q, got %v (%s)", ff, got.Level, got.Detail)
+	}
+}
+
+func TestDiagnose_FilterFile_Deduplicated(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	ff := filepath.Join(t.TempDir(), "shared-filter.txt")
+	if err := os.WriteFile(ff, []byte("- *.tmp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Two rclone jobs reference the same filter file; it should be checked once.
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "a", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: ff},
+		{Name: "b", Engine: config.EngineRclone, Source: "/y", Remotes: []string{"testlocal"}, Mode: config.ModeCopy, FilterFile: ff},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	count := 0
+	for _, c := range rep.Checks {
+		if c.Name == checkNameFilterFile {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("shared filter file: want 1 deduplicated check, got %d", count)
+	}
+}
+
+func TestDiagnose_MultipleRemotes_MixedResults(t *testing.T) {
+	defer writeRcloneConfig(t)()
+	// One remote is defined in the rclone config, one is not.
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal", "ghost"}, Mode: config.ModeCopy},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	if findRemote(t, rep, "testlocal").Level != CheckOK {
+		t.Error("defined remote in multi-remote job: want OK")
+	}
+	if findRemote(t, rep, "ghost").Level != CheckFail {
+		t.Error("undefined remote in multi-remote job: want FAIL")
 	}
 }

@@ -26,6 +26,9 @@ const checkNameConfig = "config"
 // checkNameRemote is the fixed label for per-remote check results.
 const checkNameRemote = "remote"
 
+// checkNameFilterFile is the fixed label for filter-file check results.
+const checkNameFilterFile = "filter file"
+
 // CheckLevel is the severity of a single diagnostic check.
 type CheckLevel int
 
@@ -320,9 +323,9 @@ func filterFileChecks(cfg *config.Config) []CheckResult {
 	var checks []CheckResult
 	for _, ff := range rcloneFilterFiles(cfg) {
 		if _, err := os.Stat(ff); err != nil {
-			checks = append(checks, CheckResult{Name: "filter file", Level: CheckFail, Detail: ff + " — not found"})
+			checks = append(checks, CheckResult{Name: checkNameFilterFile, Level: CheckFail, Detail: ff + " — not found"})
 		} else {
-			checks = append(checks, CheckResult{Name: "filter file", Level: CheckOK, Detail: ff})
+			checks = append(checks, CheckResult{Name: checkNameFilterFile, Level: CheckOK, Detail: ff})
 		}
 	}
 	return checks
