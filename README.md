@@ -94,6 +94,7 @@ go build -ldflags "-X main.version=1.0.0" -o shuttle ./cmd/shuttle
 shuttle [flags]          Run the sync pipeline (same as `shuttle run`)
 shuttle run [flags]      Run the sync pipeline
 shuttle validate         Parse the config file and report errors
+shuttle doctor           Check environment and config readiness
 shuttle version          Print version
 ```
 
@@ -122,6 +123,26 @@ Informational output (banners, progress, per-job status, the final summary) goes
 | 1 | Partial failure (some items failed, others completed) |
 | 2 | Config or usage error |
 | 130 | Interrupted by signal (SIGINT/SIGTERM) |
+
+### Doctor
+
+`shuttle doctor` checks that your environment is ready and prints a status-first report. It verifies that `rsync` and `rclone` are installed (with versions), the config loads and validates, every remote named in the config exists in your rclone config, and any referenced filter files exist. It performs **no network access** and never prompts for the rclone password.
+
+```
+$ shuttle doctor
+shuttle doctor
+
+  ✓ rsync         3.2.7
+  ✓ rclone        v1.66.0
+  ✓ config        /Users/you/.config/shuttle/config.toml
+  ✓ remote        crypt_gdrive
+  ✗ remote        koofr — not found in rclone config
+  ✓ filter file   /Users/you/.config/shuttle/rclone-filter.txt
+
+  5 ok · 1 failed
+```
+
+Honors `--config` and `--color`. Exits `0` when all checks pass or only warn, `2` when any check fails — so `shuttle doctor && shuttle run` works as a precondition gate.
 
 ## Configuration
 
