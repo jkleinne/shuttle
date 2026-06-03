@@ -454,34 +454,12 @@ func (r *Runner) checkPrerequisites(opts RunOptions) error {
 }
 
 // collectFilterFiles returns all unique filter file paths that will be used
-// by active rclone jobs (considering both default and per-job overrides).
+// by active rclone jobs (considering both default and per-job overrides),
+// scoped to the jobs that survive the --skip/--only selection.
 func (r *Runner) collectFilterFiles(opts RunOptions) []string {
-	seen := make(map[string]bool)
-	var files []string
-
-	defaultFilter := ""
-	if r.cfg.Defaults != nil && r.cfg.Defaults.Rclone != nil {
-		defaultFilter = r.cfg.Defaults.Rclone.FilterFile
-	}
-
-	for _, job := range r.cfg.Jobs {
-		if job.Engine != config.EngineRclone {
-			continue
-		}
-		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-			continue
-		}
-
-		ff := job.FilterFile
-		if ff == "" {
-			ff = defaultFilter
-		}
-		if ff != "" && !seen[ff] {
-			seen[ff] = true
-			files = append(files, ff)
-		}
-	}
-	return files
+	return r.cfg.RcloneFilterFiles(func(j config.Job) bool {
+		return shouldRunJob(j.Name, opts.SkipJobs, opts.OnlyJobs)
+	})
 }
 
 // acquireLock obtains an exclusive, non-blocking file lock via syscall.Flock.

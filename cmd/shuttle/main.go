@@ -111,6 +111,34 @@ func run() int {
 		SilenceErrors: true,
 	}
 
+	doctorCmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Check environment and configuration readiness",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, explicit, err := resolveConfigPath(cli.ConfigPath)
+			if err != nil {
+				return err
+			}
+			cfg, loadErr := config.LoadFile(path)
+			report := engine.Diagnose(cmd.Context(), engine.ConfigStatus{
+				Path:     path,
+				Cfg:      cfg,
+				LoadErr:  loadErr,
+				Explicit: explicit,
+			})
+			stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
+			useColor := resolveColor(cli.ColorMode, stdoutIsTTY, os.Getenv("NO_COLOR") != "")
+			engine.RenderReport(os.Stdout, report, useColor)
+			if report.HasFailures() {
+				return errDoctorFailed
+			}
+			return nil
+		},
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	doctorCmd.Flags().StringVar(&cli.ColorMode, "color", colorAuto, "Colorize terminal output: auto|always|never")
+
 	// Register the same flags on both root and run so both invocation styles
 	// (`shuttle --dry-run` and `shuttle run --dry-run`) accept them.
 	for _, cmd := range []*cobra.Command{rootCmd, runCmd} {
@@ -128,7 +156,7 @@ func run() int {
 	rootCmd.PersistentFlags().StringVarP(&cli.ConfigPath, "config", "c", "",
 		"Path to config file (overrides $SHUTTLE_CONFIG and the default XDG location)")
 
-	rootCmd.AddCommand(runCmd, versionCmd, validateCmd)
+	rootCmd.AddCommand(runCmd, versionCmd, validateCmd, doctorCmd)
 
 	// Context wired to OS signals. The goroutine sets signaled before canceling
 	// so the exit-code check below can distinguish a signal from a normal error.
@@ -152,6 +180,9 @@ func run() int {
 	}
 	if errors.Is(err, errPartialFailure) {
 		return exitPartialFailure
+	}
+	if errors.Is(err, errDoctorFailed) {
+		return exitUsageError
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -274,6 +305,10 @@ func resolveColor(mode string, stdoutIsTTY, noColor bool) bool {
 // errPartialFailure is the sentinel returned by executeRun when at least one
 // sync item failed. The caller maps it to exitPartialFailure.
 var errPartialFailure = fmt.Errorf("one or more tasks failed")
+
+// errDoctorFailed is returned by doctorCmd when at least one diagnostic check
+// failed. run() maps it to exit 2 silently (the report already lists failures).
+var errDoctorFailed = errors.New("doctor found problems")
 
 // executeRun loads config, sets up the logger, optionally prompts for the
 // rclone config password, then runs the full sync pipeline.
