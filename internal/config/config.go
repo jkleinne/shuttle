@@ -221,6 +221,37 @@ func (c *Config) AllRemoteNames() []string {
 	return names
 }
 
+// RcloneFilterFiles returns the deduplicated filter-file paths referenced by
+// rclone jobs for which include returns true, applying the [defaults.rclone]
+// filter_file when a job sets none, in first-seen order. A nil include selects
+// all rclone jobs. Shared by the run pipeline (which passes a --skip/--only
+// predicate) and `shuttle doctor` (which passes nil to check every job).
+func (c *Config) RcloneFilterFiles(include func(Job) bool) []string {
+	defaultFilter := ""
+	if c.Defaults != nil && c.Defaults.Rclone != nil {
+		defaultFilter = c.Defaults.Rclone.FilterFile
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, job := range c.Jobs {
+		if job.Engine != EngineRclone {
+			continue
+		}
+		if include != nil && !include(job) {
+			continue
+		}
+		ff := job.FilterFile
+		if ff == "" {
+			ff = defaultFilter
+		}
+		if ff != "" && !seen[ff] {
+			seen[ff] = true
+			files = append(files, ff)
+		}
+	}
+	return files
+}
+
 // ConfigPath returns the canonical config file path, respecting XDG_CONFIG_HOME.
 // Exported so the CLI can pass it to the runner for per-config locking.
 func ConfigPath() (string, error) {

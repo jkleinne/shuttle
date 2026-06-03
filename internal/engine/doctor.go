@@ -329,10 +329,12 @@ func listRcloneRemotes(ctx context.Context) (map[string]bool, error) {
 	return set, nil
 }
 
-// filterFileChecks stats each unique rclone filter file referenced by the config.
+// filterFileChecks stats each unique rclone filter file referenced by the
+// config. Unlike the run pipeline, doctor checks every configured rclone job,
+// so it passes a nil predicate.
 func filterFileChecks(cfg *config.Config) []CheckResult {
 	var checks []CheckResult
-	for _, ff := range rcloneFilterFiles(cfg) {
+	for _, ff := range cfg.RcloneFilterFiles(nil) {
 		if _, err := os.Stat(ff); err != nil {
 			checks = append(checks, CheckResult{Name: checkNameFilterFile, Level: CheckFail, Detail: ff + " — not found"})
 		} else {
@@ -340,31 +342,4 @@ func filterFileChecks(cfg *config.Config) []CheckResult {
 		}
 	}
 	return checks
-}
-
-// rcloneFilterFiles returns the deduplicated filter-file paths referenced by all
-// rclone jobs (default plus per-job overrides), in first-seen order. Unlike
-// Runner.collectFilterFiles this is not run-filter-aware: doctor checks every
-// configured job.
-func rcloneFilterFiles(cfg *config.Config) []string {
-	defaultFilter := ""
-	if cfg.Defaults != nil && cfg.Defaults.Rclone != nil {
-		defaultFilter = cfg.Defaults.Rclone.FilterFile
-	}
-	seen := make(map[string]bool)
-	var files []string
-	for _, job := range cfg.Jobs {
-		if job.Engine != config.EngineRclone {
-			continue
-		}
-		ff := job.FilterFile
-		if ff == "" {
-			ff = defaultFilter
-		}
-		if ff != "" && !seen[ff] {
-			seen[ff] = true
-			files = append(files, ff)
-		}
-	}
-	return files
 }

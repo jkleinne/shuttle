@@ -386,6 +386,36 @@ destination = "/tmp/dst"
 	}
 }
 
+func TestRcloneFilterFiles(t *testing.T) {
+	cfg := &config.Config{
+		Defaults: &config.Defaults{Rclone: &config.RcloneDefaults{FilterFile: "/def.txt"}},
+		Jobs: []config.Job{
+			{Name: "a", Engine: config.EngineRclone, FilterFile: "/a.txt"},
+			{Name: "b", Engine: config.EngineRclone},               // inherits default
+			{Name: "c", Engine: config.EngineRclone, FilterFile: "/a.txt"}, // dup of a
+			{Name: "r", Engine: config.EngineRsync, Sources: []string{"/x"}, Destination: "/y"}, // ignored
+		},
+	}
+
+	all := cfg.RcloneFilterFiles(nil)
+	// nil predicate selects all rclone jobs; first-seen, deduped: /a.txt, /def.txt.
+	if len(all) != 2 || all[0] != "/a.txt" || all[1] != "/def.txt" {
+		t.Fatalf("nil predicate: got %v, want [/a.txt /def.txt]", all)
+	}
+
+	// Predicate that selects only job "b" drops the others; "b" inherits the default.
+	only := cfg.RcloneFilterFiles(func(j config.Job) bool { return j.Name == "b" })
+	if len(only) != 1 || only[0] != "/def.txt" {
+		t.Fatalf("predicate filter: got %v, want [/def.txt]", only)
+	}
+
+	// A predicate that excludes every job yields no filter files.
+	none := cfg.RcloneFilterFiles(func(config.Job) bool { return false })
+	if len(none) != 0 {
+		t.Fatalf("excluding predicate: got %v, want empty", none)
+	}
+}
+
 func TestLogRetentionDays_Unset_ReturnsDefault(t *testing.T) {
 	tomlData := `
 [[job]]
