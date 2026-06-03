@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,7 +132,7 @@ func TestDiagnose_ConfigInvalid_Fails(t *testing.T) {
 }
 
 func TestDiagnose_ToolsPresent_OK(t *testing.T) {
-	// rsync and rclone are on the dev/CI PATH (other integration tests require them).
+	requireRclone(t) // rclone is not installed on CI runners; rsync is ambient there.
 	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: &config.Config{}})
 	for _, name := range []string{"rsync", "rclone"} {
 		if findCheck(t, rep, name).Level != CheckOK {
@@ -187,7 +188,19 @@ func findRemote(t *testing.T, rep Report, remote string) CheckResult {
 	return CheckResult{}
 }
 
+// requireRclone skips the test when rclone is not installed. The rclone-dependent
+// doctor checks exec the real binary, so on a machine without it (e.g. CI runners
+// that do not install rclone) these tests cannot run. Mirrors the skip convention
+// in rclone_test.go.
+func requireRclone(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("rclone"); err != nil {
+		t.Skip("rclone not found on PATH")
+	}
+}
+
 func TestDiagnose_RemoteDefined_OK(t *testing.T) {
+	requireRclone(t)
 	defer writeRcloneConfig(t)()
 	cfg := &config.Config{Jobs: []config.Job{
 		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy},
@@ -199,6 +212,7 @@ func TestDiagnose_RemoteDefined_OK(t *testing.T) {
 }
 
 func TestDiagnose_RemoteUndefined_Fails(t *testing.T) {
+	requireRclone(t)
 	defer writeRcloneConfig(t)()
 	cfg := &config.Config{Jobs: []config.Job{
 		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"ghost"}, Mode: config.ModeCopy},
@@ -237,6 +251,7 @@ func TestDiagnose_FilterFilePresent_OK(t *testing.T) {
 
 // Security: a remote name with shell metacharacters must be compared, never run.
 func TestDiagnose_RemoteNameWithMetachars_NotExecuted(t *testing.T) {
+	requireRclone(t)
 	defer writeRcloneConfig(t)()
 	tmp := t.TempDir()
 	evil := "x; touch " + filepath.Join(tmp, "pwned")
@@ -258,6 +273,7 @@ func TestDiagnose_RemoteNameWithMetachars_NotExecuted(t *testing.T) {
 // encrypted blob makes listremotes exit non-zero regardless of password. The
 // env-var NAME RCLONE_CONFIG_PASS is public guidance and is allowed in the WARN.
 func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
+	requireRclone(t)
 	confPath := filepath.Join(t.TempDir(), "rclone.conf")
 	encrypted := "# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\nc29tZWdhcmJhZ2VlbmNyeXB0ZWRibG9i\n"
 	if err := os.WriteFile(confPath, []byte(encrypted), 0o644); err != nil {
@@ -333,6 +349,7 @@ func TestDiagnose_FilterFile_Deduplicated(t *testing.T) {
 }
 
 func TestDiagnose_MultipleRemotes_MixedResults(t *testing.T) {
+	requireRclone(t)
 	defer writeRcloneConfig(t)()
 	// One remote is defined in the rclone config, one is not.
 	cfg := &config.Config{Jobs: []config.Job{
