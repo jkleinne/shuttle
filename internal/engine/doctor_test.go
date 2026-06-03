@@ -235,18 +235,19 @@ func TestDiagnose_RemoteNameWithMetachars_NotExecuted(t *testing.T) {
 }
 
 // Security: when rclone cannot read its config (here: an encrypted-marker
-// config that rclone rejects under --ask-password=false), doctor reports a WARN
-// (not a hang, not a FAIL), skips per-remote checks, and leaks no secret. The
-// malformed encrypted blob is what makes listremotes exit non-zero; the empty
-// RCLONE_CONFIG_PASS just guarantees no ambient password is in play.
+// config that rclone rejects), doctor reports a WARN (not a hang, not a FAIL),
+// skips per-remote checks, and never echoes the password VALUE. The malformed
+// encrypted blob makes listremotes exit non-zero regardless of password. The
+// env-var NAME RCLONE_CONFIG_PASS is public guidance and is allowed in the WARN.
 func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
 	confPath := filepath.Join(t.TempDir(), "rclone.conf")
 	encrypted := "# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\nc29tZWdhcmJhZ2VlbmNyeXB0ZWRibG9i\n"
 	if err := os.WriteFile(confPath, []byte(encrypted), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	const sentinelPass = "sentinel-pw-do-not-leak-9f3a2b"
 	t.Setenv("RCLONE_CONFIG", confPath)
-	t.Setenv("RCLONE_CONFIG_PASS", "")
+	t.Setenv("RCLONE_CONFIG_PASS", sentinelPass)
 
 	cfg := &config.Config{Jobs: []config.Job{
 		{Name: "cloud", Engine: config.EngineRclone, Source: "/x", Remotes: []string{"testlocal"}, Mode: config.ModeCopy},
@@ -261,11 +262,11 @@ func TestDiagnose_EncryptedRcloneConfig_Warns(t *testing.T) {
 		if c.Name == "remote" {
 			t.Errorf("per-remote check %q should be skipped on read failure", c.Detail)
 		}
-		if strings.Contains(c.Detail, "RCLONE_CONFIG_PASS") {
-			t.Fatalf("check detail leaked secret reference: %q", c.Detail)
+		if strings.Contains(c.Detail, sentinelPass) {
+			t.Fatalf("check detail leaked the password value: %q", c.Detail)
 		}
 	}
 	if !warned {
-		t.Error("encrypted config without password: want a 'remotes' WARN")
+		t.Error("unreadable encrypted config: want a 'remotes' WARN")
 	}
 }

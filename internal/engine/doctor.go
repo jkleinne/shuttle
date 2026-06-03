@@ -282,7 +282,7 @@ func remoteChecks(ctx context.Context, cfg *config.Config) []CheckResult {
 		return []CheckResult{{
 			Name:   "remotes",
 			Level:  CheckWarn,
-			Detail: "could not read rclone remotes (encrypted config? supply the config password)",
+			Detail: "could not read rclone remotes (encrypted config? set RCLONE_CONFIG_PASS)",
 		}}
 	}
 	checks := make([]CheckResult, 0, len(names))
