@@ -212,9 +212,11 @@ func classifyConfig(cs ConfigStatus) CheckResult {
 
 // toolCheck reports whether an external tool is on PATH. absentLevel is the
 // severity to use when the tool is missing (CheckFail when the loaded config
-// uses this engine, CheckWarn when it does not). When present, the version
-// func supplies the detail.
-func toolCheck(ctx context.Context, name string, absentLevel CheckLevel, version func(context.Context) string) CheckResult {
+// uses this engine, CheckWarn when it does not). When present but its version
+// probe fails, the tool is reported as a WARN: a binary that resolves on PATH
+// yet cannot report its version (corrupt, wrong-arch, or a failing wrapper)
+// would otherwise misrepresent readiness as OK.
+func toolCheck(ctx context.Context, name string, absentLevel CheckLevel, version func(context.Context) (string, error)) CheckResult {
 	if _, err := exec.LookPath(name); err != nil {
 		detail := "not found on PATH"
 		if absentLevel == CheckWarn {
@@ -222,36 +224,40 @@ func toolCheck(ctx context.Context, name string, absentLevel CheckLevel, version
 		}
 		return CheckResult{Name: name, Level: absentLevel, Detail: detail}
 	}
-	return CheckResult{Name: name, Level: CheckOK, Detail: version(ctx)}
+	detail, err := version(ctx)
+	if err != nil {
+		return CheckResult{Name: name, Level: CheckWarn, Detail: "on PATH but version check failed"}
+	}
+	return CheckResult{Name: name, Level: CheckOK, Detail: detail}
 }
 
-// rsyncVersion returns the rsync version token, or "installed" if it cannot be
-// determined. Example first line: "rsync  version 3.2.7  protocol version 31".
-func rsyncVersion(ctx context.Context) string {
+// rsyncVersion returns the rsync version token, or an error if the probe fails.
+// Example first line: "rsync  version 3.2.7  protocol version 31".
+func rsyncVersion(ctx context.Context) (string, error) {
 	line, err := commandFirstLine(ctx, "rsync", "--version")
 	if err != nil {
-		return "installed"
+		return "", err
 	}
 	fields := strings.Fields(line)
 	for i, f := range fields {
 		if f == "version" && i+1 < len(fields) {
-			return fields[i+1]
+			return fields[i+1], nil
 		}
 	}
-	return line
+	return line, nil
 }
 
-// rcloneVersion returns the rclone version token, or "installed" if it cannot
-// be determined. Example first line: "rclone v1.66.0".
-func rcloneVersion(ctx context.Context) string {
+// rcloneVersion returns the rclone version token, or an error if the probe
+// fails. Example first line: "rclone v1.66.0".
+func rcloneVersion(ctx context.Context) (string, error) {
 	line, err := commandFirstLine(ctx, "rclone", "version")
 	if err != nil {
-		return "installed"
+		return "", err
 	}
 	if fields := strings.Fields(line); len(fields) >= 2 {
-		return fields[1]
+		return fields[1], nil
 	}
-	return line
+	return line, nil
 }
 
 // commandFirstLine runs name+args and returns the trimmed first line of stdout.

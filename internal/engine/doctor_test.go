@@ -140,6 +140,24 @@ func TestDiagnose_ToolsPresent_OK(t *testing.T) {
 	}
 }
 
+func TestDiagnose_ToolPresentButVersionFails_Warns(t *testing.T) {
+	dir := t.TempDir()
+	// A fake `rsync` that is on PATH but exits non-zero (corrupt binary / failing wrapper).
+	fake := filepath.Join(dir, "rsync")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir) // only the fake rsync is resolvable
+	cfg := &config.Config{Jobs: []config.Job{
+		{Name: "local", Engine: config.EngineRsync, Sources: []string{"/x"}, Destination: "/y"},
+	}}
+	rep := Diagnose(context.Background(), ConfigStatus{Path: "/tmp/c.toml", Cfg: cfg})
+	got := findCheck(t, rep, "rsync")
+	if got.Level != CheckWarn {
+		t.Errorf("tool on PATH but --version failing: want WARN, got %v (%s)", got.Level, got.Detail)
+	}
+}
+
 func TestDiagnose_ToolMissing_SeverityByNeed(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // scrub PATH: no tools found
 	cfg := &config.Config{Jobs: []config.Job{
