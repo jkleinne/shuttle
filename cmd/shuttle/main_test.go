@@ -796,6 +796,41 @@ destination = %q
 	}
 }
 
+func TestDoctor_CleanConfig_ExitZero(t *testing.T) {
+	env := writeConfig(t, `
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp"]
+destination = "/tmp/backup"
+`)
+	res := runShuttle(t, env, "doctor")
+	if res.exitCode != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "shuttle doctor") {
+		t.Errorf("stdout missing header: %q", res.stdout)
+	}
+}
+
+func TestDoctor_FailingChecks_ExitTwo(t *testing.T) {
+	// An rclone job referencing an undefined remote (no rclone config under the
+	// test HOME) and a missing filter file both produce FAILs → exit 2.
+	env := writeConfig(t, `
+[[job]]
+name = "cloud"
+engine = "rclone"
+source = "/tmp"
+remotes = ["ghost_remote"]
+mode = "copy"
+filter_file = "/no/such/filter.txt"
+`)
+	res := runShuttle(t, env, "doctor")
+	if res.exitCode != 2 {
+		t.Fatalf("exit = %d, want 2\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
+}
+
 func TestCLI_OptionalMissing_ExitZero(t *testing.T) {
 	if _, err := exec.LookPath("rclone"); err != nil {
 		t.Skip("rclone not found on PATH; test requires rclone for prerequisite check")
