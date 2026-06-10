@@ -158,24 +158,29 @@ func run() int {
 
 	rootCmd.AddCommand(runCmd, versionCmd, validateCmd, doctorCmd)
 
-	// Context wired to OS signals. The goroutine sets signaled before canceling
-	// so the exit-code check below can distinguish a signal from a normal error.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Context canceled on SIGINT/SIGTERM. The parent is Background and stop
+	// runs only after the exit-code check below, so once ExecuteContext
+	// returns, ctx.Err() != nil can mean exactly one thing: a signal arrived.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	var signaled bool
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// Companion channel for UX only: print the interrupt notice at receipt
+	// time and restore the default disposition so a second signal terminates
+	// the process immediately instead of being swallowed. Registration order
+	// is load-bearing: NotifyContext above must register first so a signal
+	// landing between the two calls still cancels (at worst the notice line
+	// is skipped).
+	interruptCh := make(chan os.Signal, 1)
+	signal.Notify(interruptCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		signaled = true
+		<-interruptCh
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
 		fmt.Fprintln(os.Stderr, "\nInterrupted. Shutting down...")
-		cancel()
 	}()
 
 	err := rootCmd.ExecuteContext(ctx)
 
-	if signaled {
+	if ctx.Err() != nil {
 		return exitSignal
 	}
 	if errors.Is(err, errPartialFailure) {
