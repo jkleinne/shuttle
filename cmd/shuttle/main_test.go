@@ -881,12 +881,13 @@ func TestResolveRclonePassword_EnvPreset_ReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestCLI_SIGINT_ExitsWithSignalCode verifies the public exit-code contract
-// for interrupted runs: SIGINT during an active job yields exit 130 and the
-// interrupt notice on stderr. The job is throttled via --bwlimit so the
+// assertSignalExitsWithSignalCode verifies the public exit-code contract for
+// interrupted runs: the given signal during an active job yields exit 130 and
+// the interrupt notice on stderr. The job is throttled via --bwlimit so the
 // process is reliably still alive when the signal lands; the exit code is
 // 130 regardless of which pipeline stage the cancellation interrupts.
-func TestCLI_SIGINT_ExitsWithSignalCode(t *testing.T) {
+func assertSignalExitsWithSignalCode(t *testing.T, sig syscall.Signal) {
+	t.Helper()
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")
 	}
@@ -932,8 +933,8 @@ extra_flags = ["--bwlimit=100"]
 		_ = cmd.Process.Kill()
 		t.Fatalf("never saw startup line; stderr: %s", stderrBuf.String())
 	}
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatalf("sending SIGINT: %v", err)
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("sending %v: %v", sig, err)
 	}
 	// Drain remaining stdout so the child never blocks on a full pipe.
 	go func() { _, _ = io.Copy(io.Discard, stdout) }()
@@ -949,4 +950,14 @@ extra_flags = ["--bwlimit=100"]
 	if !strings.Contains(stderrBuf.String(), "Interrupted") {
 		t.Errorf("stderr = %q, want interrupt notice", stderrBuf.String())
 	}
+}
+
+func TestCLI_SIGINT_ExitsWithSignalCode(t *testing.T) {
+	assertSignalExitsWithSignalCode(t, syscall.SIGINT)
+}
+
+// SIGTERM is what cron and launchd send on shutdown, so the second registered
+// signal gets the same contract coverage as the interactive ctrl-C path.
+func TestCLI_SIGTERM_ExitsWithSignalCode(t *testing.T) {
+	assertSignalExitsWithSignalCode(t, syscall.SIGTERM)
 }

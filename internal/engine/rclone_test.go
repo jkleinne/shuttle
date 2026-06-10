@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -494,6 +495,28 @@ func TestCleanupArchives_ListingFailure_ReturnsError(t *testing.T) {
 	err := executor.CleanupArchives(context.Background(), "nosuchremote", "/tmp/whatever", 7, false)
 	if err == nil {
 		t.Fatal("CleanupArchives = nil, want error for undefined remote")
+	}
+	if !strings.Contains(err.Error(), "listing archive root") {
+		t.Errorf("error %q should carry the listing context", err)
+	}
+}
+
+func TestFirstStderrLine(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"non-exit error", errors.New("plain failure"), ""},
+		{"exit error with empty stderr", &exec.ExitError{}, ""},
+		{"multi-line stderr returns first line trimmed", &exec.ExitError{Stderr: []byte("  first line  \nsecond line\n")}, "first line"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := firstStderrLine(tt.err); got != tt.want {
+				t.Errorf("firstStderrLine(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

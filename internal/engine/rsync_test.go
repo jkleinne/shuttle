@@ -274,6 +274,18 @@ func TestTailBuffer_MultiWriteWrap_KeepsLastBytes(t *testing.T) {
 	}
 }
 
+func TestTailBuffer_EmptyWrite_LeavesContentUnchanged(t *testing.T) {
+	tb := newTailBuffer(4)
+	if got := tb.Bytes(); len(got) != 0 {
+		t.Errorf("Bytes() before any write = %q, want empty", got)
+	}
+	_, _ = tb.Write([]byte("ab"))
+	_, _ = tb.Write(nil)
+	if got := string(tb.Bytes()); got != "ab" {
+		t.Errorf("Bytes() = %q, want %q", got, "ab")
+	}
+}
+
 func TestScanRsyncProgress_OverCapacityStream_StatsStillParsed(t *testing.T) {
 	// Simulates a -v run whose file listing exceeds the capture bound: only
 	// the head may be dropped; the trailing stats block must survive.
