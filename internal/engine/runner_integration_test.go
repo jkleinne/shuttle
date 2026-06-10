@@ -67,7 +67,7 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 		t.Fatalf("creating logger: %v", err)
 	}
 	pw := NewProgressWriter(io.Discard, false, false)
-	runner := NewRunner(cfg, configPath, logger, pw, opts.DryRun, logFile)
+	runner := NewRunner(RunnerConfig{Cfg: cfg, ConfigPath: configPath, Logger: logger, Progress: pw, DryRun: opts.DryRun, LogFile: logFile})
 	summary, err := runner.Run(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -268,7 +268,7 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("creating logger %s: %v", tag, err)
 		}
-		return NewRunner(cfg, configPath, logger, NewProgressWriter(io.Discard, false, false), false, logFile)
+		return NewRunner(RunnerConfig{Cfg: cfg, ConfigPath: configPath, Logger: logger, Progress: NewProgressWriter(io.Discard, false, false), LogFile: logFile})
 	}
 
 	run1 := newRunner("run1")

@@ -41,23 +41,34 @@ type Runner struct {
 	lockFile   *os.File // held open to maintain flock; released on process exit
 }
 
-// NewRunner creates a Runner for the given config. configPath is the
-// absolute path to the config file (used for per-config locking).
-// pw controls live terminal progress display. If nil, a non-interactive
-// writer is created that prints plain status lines to io.Discard.
-func NewRunner(cfg *config.Config, configPath string, logger *log.Logger, pw *ProgressWriter, dryRun bool, logFile string) *Runner {
+// RunnerConfig carries the inputs needed to construct a Runner. Grouped into
+// a struct so the constructor stays within the project's argument-count
+// budget and so each call site names the field it sets at the boundary.
+type RunnerConfig struct {
+	Cfg        *config.Config
+	ConfigPath string        // absolute path to the config file (used for per-config locking)
+	Logger     *log.Logger
+	Progress   *ProgressWriter // live terminal display; nil yields a discard writer
+	DryRun     bool
+	LogFile    string
+}
+
+// NewRunner creates a Runner from rc. If rc.Progress is nil, a non-interactive
+// writer that prints plain status lines to io.Discard is used.
+func NewRunner(rc RunnerConfig) *Runner {
+	pw := rc.Progress
 	if pw == nil {
 		pw = NewProgressWriter(io.Discard, false, false)
 	}
 	return &Runner{
-		cfg:        cfg,
-		configPath: configPath,
-		logger:     logger,
+		cfg:        rc.Cfg,
+		configPath: rc.ConfigPath,
+		logger:     rc.Logger,
 		pw:         pw,
-		rsync:      NewRsyncExecutor(logger),
-		rclone:     NewRcloneExecutor(logger, logFile),
-		dryRun:     dryRun,
-		logFile:    logFile,
+		rsync:      NewRsyncExecutor(rc.Logger),
+		rclone:     NewRcloneExecutor(rc.Logger, rc.LogFile),
+		dryRun:     rc.DryRun,
+		logFile:    rc.LogFile,
 	}
 }
 

@@ -120,7 +120,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 		t.Fatalf("creating logger: %v", err)
 	}
 	pw := NewProgressWriter(io.Discard, false, false)
-	return NewRunner(&config.Config{}, "", logger, pw, false, logFile)
+	return NewRunner(RunnerConfig{Cfg: &config.Config{}, Logger: logger, Progress: pw, LogFile: logFile})
 }
 
 func TestRunRsyncJob_Optional_MissingSource_MarksOptionalMissing(t *testing.T) {

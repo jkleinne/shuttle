@@ -387,7 +387,14 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 	}
 
 	pw := engine.NewProgressWriter(progressOut, progressInteractive, useColor)
-	runner := engine.NewRunner(cfg, configPath, logger, pw, opts.DryRun, logPath)
+	runner := engine.NewRunner(engine.RunnerConfig{
+		Cfg:        cfg,
+		ConfigPath: configPath,
+		Logger:     logger,
+		Progress:   pw,
+		DryRun:     opts.DryRun,
+		LogFile:    logPath,
+	})
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
 		return err
