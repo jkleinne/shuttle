@@ -484,6 +484,108 @@ func TestCleanupArchives_KeepsRecent(t *testing.T) {
 	}
 }
 
+func TestCleanupArchives_ListingFailure_ReturnsError(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	executor, _ := newRcloneTestExecutor(t)
+	// "nosuchremote" is not defined in the temp rclone config, so lsd fails
+	// with a non-3 exit code: a real configuration problem, not "no archives".
+	err := executor.CleanupArchives(context.Background(), "nosuchremote", "/tmp/whatever", 7, false)
+	if err == nil {
+		t.Fatal("CleanupArchives = nil, want error for undefined remote")
+	}
+}
+
+func TestCleanupArchives_CanceledContext_ReturnsError(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	archiveRoot := t.TempDir()
+	// Seeded expired-looking directory: asserting it survives makes the
+	// "failed probe performs zero purges" property observable, not just
+	// structural.
+	expiredDir := filepath.Join(archiveRoot, "2020-01-01_000000")
+	if err := os.MkdirAll(expiredDir, 0o755); err != nil {
+		t.Fatalf("seeding expired dir: %v", err)
+	}
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	cancelCtx()
+	executor, _ := newRcloneTestExecutor(t)
+	err := executor.CleanupArchives(ctx, "testlocal", archiveRoot, 7, false)
+	if err == nil {
+		t.Fatal("CleanupArchives = nil, want error for canceled context")
+	}
+	if _, statErr := os.Stat(expiredDir); statErr != nil {
+		t.Errorf("expired dir should survive a failed probe (zero purges): %v", statErr)
+	}
+}
+
+func TestCleanupArchives_MissingBackupRoot_NoError(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	executor, _ := newRcloneTestExecutor(t)
+	missing := filepath.Join(t.TempDir(), "never-created")
+	if err := executor.CleanupArchives(context.Background(), "testlocal", missing, 7, false); err != nil {
+		t.Fatalf("CleanupArchives = %v, want nil for missing backup root (rclone exit 3)", err)
+	}
+}
+
+func TestCleanupArchives_UnrecognizedAndInvalidDirs_NeverPurged(t *testing.T) {
+	skipIfNoRclone(t)
+	cleanup := writeRcloneConfig(t)
+	defer cleanup()
+	archiveRoot := t.TempDir()
+	keep := []string{
+		"manual-backup-keep",    // no date prefix
+		"0000-13-45-junk",       // date-shaped but calendar-invalid
+		"with space 2019-01-01", // lsd fragment names a nonexistent sibling
+	}
+	for _, name := range keep {
+		if err := os.MkdirAll(filepath.Join(archiveRoot, name), 0o755); err != nil {
+			t.Fatalf("seeding %s: %v", name, err)
+		}
+	}
+	executor, _ := newRcloneTestExecutor(t)
+	if err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false); err != nil {
+		t.Fatalf("CleanupArchives returned error: %v", err)
+	}
+	for _, name := range keep {
+		if _, err := os.Stat(filepath.Join(archiveRoot, name)); err != nil {
+			t.Errorf("directory %q should have survived cleanup: %v", name, err)
+		}
+	}
+}
+
+func TestArchiveDirExpired(t *testing.T) {
+	const cutoff = "2026-05-10"
+	tests := []struct {
+		name       string
+		dir        string
+		expired    bool
+		recognized bool
+	}{
+		{"valid and old", "2020-01-01_000000", true, true},
+		{"valid and recent", "2026-06-01_000000", false, true},
+		{"valid equal to cutoff is kept", "2026-05-10_000000", false, true},
+		{"bare date older", "2020-01-01", true, true},
+		{"too short", "2020-01", false, false},
+		{"dashes misplaced", "20200101--name", false, false},
+		{"calendar invalid", "0000-13-45-junk", false, false},
+		{"no date at all", "manual-backup", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expired, recognized := archiveDirExpired(tt.dir, cutoff)
+			if expired != tt.expired || recognized != tt.recognized {
+				t.Errorf("archiveDirExpired(%q) = (%v, %v), want (%v, %v)",
+					tt.dir, expired, recognized, tt.expired, tt.recognized)
+			}
+		})
+	}
+}
+
 func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 	skipIfNoRclone(t)
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -233,17 +234,73 @@ func selectMode(mode, destination, remoteName, backupPath, runTimestamp string, 
 	return "sync", ""
 }
 
+// archiveDateLayout is the date prefix on archive directory names; the run
+// timestamp used for --backup-dir construction starts with this format.
+const archiveDateLayout = "2006-01-02"
+
+// rcloneExitDirNotFound is rclone's documented exit code for "directory not
+// found", the one lsd failure that means "no archives yet" rather than a
+// real problem. https://rclone.org/docs/#exit-code
+const rcloneExitDirNotFound = 3
+
+// archiveDirExpired classifies an archive directory name against a cutoff
+// date (archiveDateLayout format). recognized is false when the name does
+// not begin with a calendar-valid date, in which case expired is
+// meaningless. Pure so purge eligibility is testable without rclone; the
+// caller filters empty names before calling.
+func archiveDirExpired(dirName, cutoff string) (expired, recognized bool) {
+	if len(dirName) < len(archiveDateLayout) {
+		return false, false
+	}
+	datePrefix := dirName[:len(archiveDateLayout)]
+	if _, err := time.Parse(archiveDateLayout, datePrefix); err != nil {
+		return false, false
+	}
+	return datePrefix < cutoff, true
+}
+
+// isDirNotFound reports whether an rclone invocation failed only because the
+// target directory does not exist.
+func isDirNotFound(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == rcloneExitDirNotFound
+}
+
+// firstStderrLine returns the first stderr line captured by Output(), or ""
+// when stderr was empty (rclone routes error text to --log-file when set,
+// leaving stderr blank in normal runs).
+func firstStderrLine(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || len(exitErr.Stderr) == 0 {
+		return ""
+	}
+	return oneLine(string(exitErr.Stderr))
+}
+
+// purgeArchiveDir runs rclone purge for one expired archive directory,
+// mirroring the lsd call's log-file routing. The caller decides how to
+// handle a failure (warn and continue).
+func (e *RcloneExecutor) purgeArchiveDir(ctx context.Context, target string) error {
+	purgeArgs := []string{"purge", target}
+	if e.logFile != "" {
+		purgeArgs = append(purgeArgs, "--log-file", e.logFile, "--log-level", "INFO")
+	}
+	return e.rcloneCommand(ctx, purgeArgs...).Run()
+}
+
 // CleanupArchives purges archive subdirectories older than retentionDays
-// from the backup root on the given remote. It is non-fatal: individual purge
-// failures are logged as warnings and do not stop processing of remaining
-// directories. Skipped during dry-run, when backupPath is empty, or when
-// retentionDays is non-positive.
+// from the backup root on the given remote. Individual purge failures are
+// logged as warnings and do not stop processing of remaining directories,
+// but a failure to list the backup root at all is returned as an error so
+// the caller can surface it; a missing backup root (rclone exit 3) is the
+// expected first-run state and stays a non-error. Skipped during dry-run,
+// when backupPath is empty, or when retentionDays is non-positive.
 func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backupPath string, retentionDays int, dryRun bool) error {
 	if backupPath == "" || retentionDays <= 0 || dryRun {
 		return nil
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format("2006-01-02")
+	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(archiveDateLayout)
 	archiveRoot := fmt.Sprintf("%s:%s", remoteName, strings.TrimRight(backupPath, "/"))
 
 	lsdArgs := []string{"lsd", archiveRoot + "/"}
@@ -252,8 +309,14 @@ func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backup
 	}
 	output, err := e.rcloneCommand(ctx, lsdArgs...).Output()
 	if err != nil {
-		e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", remoteName))
-		return nil
+		if isDirNotFound(err) {
+			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", remoteName))
+			return nil
+		}
+		if detail := firstStderrLine(err); detail != "" {
+			return fmt.Errorf("listing archive root %s: %w (%s)", archiveRoot, err, detail)
+		}
+		return fmt.Errorf("listing archive root %s: %w", archiveRoot, err)
 	}
 
 	purged := 0
@@ -264,29 +327,24 @@ func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backup
 			continue
 		}
 		dirName := fields[len(fields)-1]
-		// Archive directory names are prefixed with a YYYY-MM-DD date stamp.
-		// Skip entries that are too short to contain a full date prefix.
-		if len(dirName) < 10 {
+		expired, recognized := archiveDirExpired(dirName, cutoff)
+		if !recognized {
+			e.logger.Warn(fmt.Sprintf("archive cleanup: skipping unrecognized directory %s on %s", dirName, remoteName))
 			continue
 		}
-		dirDate := dirName[:10]
-		// Validate that the prefix looks like YYYY-MM-DD before comparing.
-		if dirDate[4] != '-' || dirDate[7] != '-' {
+		if !expired {
 			continue
 		}
-		if dirDate < cutoff {
-			target := archiveRoot + "/" + dirName
-			e.logger.Info(fmt.Sprintf("purging expired archive: %s (%s < %s)", target, dirDate, cutoff))
-			purgeArgs := []string{"purge", target}
-			if e.logFile != "" {
-				purgeArgs = append(purgeArgs, "--log-file", e.logFile, "--log-level", "INFO")
-			}
-			if purgeErr := e.rcloneCommand(ctx, purgeArgs...).Run(); purgeErr != nil {
-				e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
-			} else {
-				purged++
-			}
+		target := archiveRoot + "/" + dirName
+		e.logger.Info(fmt.Sprintf("purging expired archive: %s (%s < %s)", target, dirName[:len(archiveDateLayout)], cutoff))
+		if purgeErr := e.purgeArchiveDir(ctx, target); purgeErr != nil {
+			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
+		} else {
+			purged++
 		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return fmt.Errorf("scanning archive listing for %s: %w", archiveRoot, scanErr)
 	}
 
 	if purged > 0 {
