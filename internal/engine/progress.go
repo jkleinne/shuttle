@@ -4,13 +4,28 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const spinnerInterval = 80 * time.Millisecond
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// sanitizeProgress removes control characters (C0, C1, DEL) from progress text
+// so attacker-influenceable bytes from tool output (e.g. a filename with
+// embedded ANSI/OSC escapes) cannot drive the terminal. Shuttle's own color
+// codes are added after sanitization in renderSpinner, so they are unaffected.
+func sanitizeProgress(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
 
 // ProgressWriter manages the live terminal display during job execution.
 // In interactive mode, it shows a spinner on the active job line and replaces
@@ -81,13 +96,15 @@ func (pw *ProgressWriter) StartJob(ctx context.Context, label string) {
 
 // UpdateProgress sets the progress text displayed beside the spinner.
 // Replaces the elapsed-time default when non-empty.
+// Control characters (C0, C1, DEL) are stripped before storage so that
+// attacker-influenceable filenames in tool output cannot inject terminal escapes.
 // In non-interactive mode, this is a no-op.
 func (pw *ProgressWriter) UpdateProgress(text string) {
 	if !pw.interactive {
 		return
 	}
 	pw.mu.Lock()
-	pw.currentProgress = text
+	pw.currentProgress = sanitizeProgress(text)
 	pw.mu.Unlock()
 }
 

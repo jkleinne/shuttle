@@ -175,3 +175,36 @@ func TestProgressWriter_Interactive_MultipleJobs(t *testing.T) {
 		t.Error("missing failure status")
 	}
 }
+
+func TestSanitizeProgress(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain stats unchanged", "604 KiB / 1 MiB, 59%, 206 KiB/s, ETA 2s", "604 KiB / 1 MiB, 59%, 206 KiB/s, ETA 2s"},
+		{"bare ESC stripped", "evil\x1bxstats", "evilxstats"},
+		{"CSI clear-screen stripped", "a\x1b[2Jb", "a[2Jb"},
+		{"OSC title stripped", "x\x1b]0;pwned\x07y", "x]0;pwnedy"},
+		{"DEL stripped", "a\x7fb", "ab"},
+		{"newline and tab stripped", "a\nb\tc", "abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeProgress(tt.in); got != tt.want {
+				t.Errorf("sanitizeProgress(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateProgress_StoresSanitizedText(t *testing.T) {
+	pw := NewProgressWriter(&bytes.Buffer{}, true, false) // interactive so UpdateProgress stores
+	pw.UpdateProgress("danger\x1b]0;x\x07 100%")
+	pw.mu.Lock()
+	got := pw.currentProgress
+	pw.mu.Unlock()
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("currentProgress retains control bytes: %q", got)
+	}
+}
