@@ -45,12 +45,13 @@ type Runner struct {
 // a struct so the constructor stays within the project's argument-count
 // budget and so each call site names the field it sets at the boundary.
 type RunnerConfig struct {
-	Cfg        *config.Config
-	ConfigPath string        // absolute path to the config file (used for per-config locking)
-	Logger     *log.Logger
-	Progress   *ProgressWriter // live terminal display; nil yields a discard writer
-	DryRun     bool
-	LogFile    string
+	Cfg            *config.Config
+	ConfigPath     string // absolute path to the config file (used for per-config locking)
+	Logger         *log.Logger
+	Progress       *ProgressWriter // live terminal display; nil yields a discard writer
+	DryRun         bool
+	LogFile        string
+	RclonePassword string // injected into rclone child processes only; empty means none
 }
 
 // NewRunner creates a Runner from rc. If rc.Progress is nil, a non-interactive
@@ -66,7 +67,7 @@ func NewRunner(rc RunnerConfig) *Runner {
 		logger:     rc.Logger,
 		pw:         pw,
 		rsync:      NewRsyncExecutor(rc.Logger),
-		rclone:     NewRcloneExecutor(rc.Logger, rc.LogFile),
+		rclone:     NewRcloneExecutor(rc.Logger, rc.LogFile, rc.RclonePassword),
 		dryRun:     rc.DryRun,
 		logFile:    rc.LogFile,
 	}

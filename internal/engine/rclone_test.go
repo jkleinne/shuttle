@@ -267,7 +267,7 @@ func newRcloneTestExecutor(t *testing.T) (*RcloneExecutor, string) {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "rclone-test.log")
 	logger := newTestLogger(t)
-	return NewRcloneExecutor(logger, logPath), logPath
+	return NewRcloneExecutor(logger, logPath, ""), logPath
 }
 
 func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
@@ -507,5 +507,31 @@ func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 
 	if result.Status != StatusTimedOut {
 		t.Errorf("Status = %q, want %q", result.Status, StatusTimedOut)
+	}
+}
+
+func TestRcloneCommand_InjectsPasswordOnlyWhenSet(t *testing.T) {
+	logger := newTestLogger(t)
+
+	withPass := NewRcloneExecutor(logger, "", "s3cr3t")
+	cmd := withPass.rcloneCommand(context.Background(), "version")
+	found := false
+	for _, e := range cmd.Env {
+		if e == "RCLONE_CONFIG_PASS=s3cr3t" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected RCLONE_CONFIG_PASS in cmd.Env when configPass set")
+	}
+	for _, a := range cmd.Args {
+		if strings.Contains(a, "s3cr3t") {
+			t.Errorf("password must never appear in argv, found in %q", a)
+		}
+	}
+
+	noPass := NewRcloneExecutor(logger, "", "")
+	if cmd2 := noPass.rcloneCommand(context.Background(), "version"); cmd2.Env != nil {
+		t.Errorf("cmd.Env = %v, want nil (inherit) when configPass empty", cmd2.Env)
 	}
 }

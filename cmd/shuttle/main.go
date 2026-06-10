@@ -375,7 +375,7 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 		logger.Info(fmt.Sprintf("pruned %d old log file(s)", pruneDeleted))
 	}
 
-	promptForPassword(logger)
+	rclonePass := resolveRclonePassword(logger)
 
 	// In quiet mode, the per-job spinner and status lines are suppressed so
 	// the terminal stays silent unless something fails.
@@ -388,12 +388,13 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 
 	pw := engine.NewProgressWriter(progressOut, progressInteractive, useColor)
 	runner := engine.NewRunner(engine.RunnerConfig{
-		Cfg:        cfg,
-		ConfigPath: configPath,
-		Logger:     logger,
-		Progress:   pw,
-		DryRun:     opts.DryRun,
-		LogFile:    logPath,
+		Cfg:            cfg,
+		ConfigPath:     configPath,
+		Logger:         logger,
+		Progress:       pw,
+		DryRun:         opts.DryRun,
+		LogFile:        logPath,
+		RclonePassword: rclonePass,
 	})
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
@@ -437,24 +438,27 @@ func validateRemoteNames(selected, configured []string) error {
 	return nil
 }
 
-// promptForPassword checks for RCLONE_CONFIG_PASS and prompts interactively
-// when it is absent and stdin is a TTY. The password is set in the environment
-// for rclone to pick up automatically.
-func promptForPassword(logger *log.Logger) {
+// resolveRclonePassword returns the rclone config password to inject into
+// rclone child processes, or "" when none should be injected. It returns ""
+// when RCLONE_CONFIG_PASS is already in the environment (rclone inherits it),
+// when stdin is not a TTY, or when the prompt is empty/aborted. Unlike the
+// previous implementation it does not mutate the process environment, so the
+// prompted secret never reaches sibling children such as rsync.
+func resolveRclonePassword(logger *log.Logger) string {
 	if os.Getenv("RCLONE_CONFIG_PASS") != "" {
-		return
+		return ""
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		logger.Warn("RCLONE_CONFIG_PASS not set and stdin is not a terminal.")
-		return
+		return ""
 	}
 	fmt.Print("Enter rclone config password (or press Enter if none): ")
 	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil || len(pass) == 0 {
-		return
+		return ""
 	}
-	os.Setenv("RCLONE_CONFIG_PASS", string(pass)) //nolint:errcheck // setting env cannot fail in practice
+	return string(pass)
 }
 
 // logDirectory returns the path for log files, respecting XDG_STATE_HOME.

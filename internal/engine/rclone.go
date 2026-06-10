@@ -20,14 +20,16 @@ import (
 // argument lists from the runner (built by BuildRcloneArgs) and handles command
 // execution and stats parsing from the shared log file.
 type RcloneExecutor struct {
-	logger  *log.Logger
-	logFile string
+	logger     *log.Logger
+	logFile    string
+	configPass string // rclone config password; injected per-command, empty means none
 }
 
-// NewRcloneExecutor returns a configured RcloneExecutor.
-// logFile is the path to the shared log file used for stats parsing.
-func NewRcloneExecutor(logger *log.Logger, logFile string) *RcloneExecutor {
-	return &RcloneExecutor{logger: logger, logFile: logFile}
+// NewRcloneExecutor returns a configured RcloneExecutor. logFile is the shared
+// log file used for stats parsing; configPass, when non-empty, is injected as
+// RCLONE_CONFIG_PASS into each rclone command's environment (and nowhere else).
+func NewRcloneExecutor(logger *log.Logger, logFile, configPass string) *RcloneExecutor {
+	return &RcloneExecutor{logger: logger, logFile: logFile, configPass: configPass}
 }
 
 // rcloneProgressTracker extracts transfer progress from rclone -P stdout.
@@ -107,6 +109,19 @@ func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err erro
 	return 0, nil, nil
 }
 
+// rcloneCommand builds an rclone *exec.Cmd, injecting the config password into
+// this command's environment only when one was supplied. When configPass is
+// empty the command inherits the ambient environment unchanged (covering both
+// the no-password case and a user-exported RCLONE_CONFIG_PASS). Callers choose
+// their own execution method on the returned command.
+func (e *RcloneExecutor) rcloneCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "rclone", args...)
+	if e.configPass != "" {
+		cmd.Env = append(os.Environ(), "RCLONE_CONFIG_PASS="+e.configPass)
+	}
+	return cmd
+}
+
 // Exec runs rclone with the given pre-assembled argument list.
 // Stdout is piped to a goroutine that parses -P progress output. Stats are
 // parsed from the log file section written during this call.
@@ -125,7 +140,7 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 
 	start := time.Now()
 
-	cmd := exec.CommandContext(ctx, "rclone", args...)
+	cmd := e.rcloneCommand(ctx, args...)
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
@@ -235,7 +250,7 @@ func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backup
 	if e.logFile != "" {
 		lsdArgs = append(lsdArgs, "--log-file", e.logFile, "--log-level", "INFO")
 	}
-	output, err := exec.CommandContext(ctx, "rclone", lsdArgs...).Output()
+	output, err := e.rcloneCommand(ctx, lsdArgs...).Output()
 	if err != nil {
 		e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", remoteName))
 		return nil
@@ -266,7 +281,7 @@ func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backup
 			if e.logFile != "" {
 				purgeArgs = append(purgeArgs, "--log-file", e.logFile, "--log-level", "INFO")
 			}
-			if purgeErr := exec.CommandContext(ctx, "rclone", purgeArgs...).Run(); purgeErr != nil {
+			if purgeErr := e.rcloneCommand(ctx, purgeArgs...).Run(); purgeErr != nil {
 				e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
 			} else {
 				purged++
