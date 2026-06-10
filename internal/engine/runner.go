@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -474,12 +475,61 @@ func (r *Runner) collectFilterFiles(opts RunOptions) []string {
 	})
 }
 
+// lockDirPerm is the owner-only mode for the per-user lock directory: no group
+// or other access, so a different local user cannot read or plant entries in it.
+const lockDirPerm os.FileMode = 0o700
+
+// lockDir returns the directory for the per-config lock file. It prefers
+// XDG_RUNTIME_DIR (guaranteed per-user, mode 0700 by the XDG spec); absent
+// that, it uses a per-user "shuttle-<uid>" subdirectory under os.TempDir(),
+// created and verified mode 0700 by ensureSecureDir.
+func lockDir() (string, error) {
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		return dir, nil
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%d", os.Getuid()))
+	if err := ensureSecureDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ensureSecureDir creates dir mode 0700 if absent, or verifies an existing dir
+// is a real directory (not a symlink), owned by the current user, with no
+// group/other access. It fails closed: an insecure pre-existing path is an
+// error, never silently reused.
+func ensureSecureDir(dir string) error {
+	fi, err := os.Lstat(dir) // Lstat so a planted symlink is detected, not followed
+	if errors.Is(err, fs.ErrNotExist) {
+		return os.Mkdir(dir, lockDirPerm) // parent TempDir already exists; create the leaf only
+	}
+	if err != nil {
+		return fmt.Errorf("checking lock dir %s: %w", dir, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("lock dir %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("lock dir %s is not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("lock dir %s is group/other-accessible (%o)", dir, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("lock dir %s not owned by current user", dir)
+	}
+	return nil
+}
+
 // acquireLock obtains an exclusive, non-blocking file lock via syscall.Flock.
-// The lock file path is derived from the config file path so that different
-// configs can run concurrently.
+// The lock file lives in a per-user runtime directory (see lockDir) and is
+// opened O_NOFOLLOW so a symlink planted at the path cannot redirect the open.
 func (r *Runner) acquireLock() error {
-	lockPath := r.lockFilePath()
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockPath, err := r.lockFilePath()
+	if err != nil {
+		return fmt.Errorf("resolving lock path: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
@@ -491,11 +541,16 @@ func (r *Runner) acquireLock() error {
 	return nil
 }
 
-// lockFilePath returns <tempdir>/shuttle-<hash>.lock where hash is the first
-// 8 hex characters of SHA-256 of the absolute config file path.
-func (r *Runner) lockFilePath() string {
+// lockFilePath returns <lockDir>/shuttle-<hash>.lock where hash is the first
+// 8 hex characters of SHA-256 of the absolute config file path, keeping the
+// lock per-config while the directory is per-user.
+func (r *Runner) lockFilePath() (string, error) {
+	dir, err := lockDir()
+	if err != nil {
+		return "", err
+	}
 	h := sha256.Sum256([]byte(r.configPath))
-	return filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%x.lock", h[:4]))
+	return filepath.Join(dir, fmt.Sprintf("shuttle-%x.lock", h[:4])), nil
 }
 
 // targetRemotes returns the intersection of the job's remotes and the
