@@ -65,9 +65,23 @@ func TestShouldRunJob_SkipLogic(t *testing.T) {
 	}
 }
 
+// xdgRuntimeDir returns a fresh 0700 directory and points XDG_RUNTIME_DIR at it
+// for the test's duration. t.TempDir() yields a 0755 directory on some
+// platforms, which lockDir now rejects (it verifies XDG_RUNTIME_DIR to the same
+// fail-closed bar as the fallback, matching the real XDG 0700 contract), so the
+// perms are tightened explicitly here.
+func xdgRuntimeDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	return dir
+}
+
 func TestLockFilePath_DifferentConfigs(t *testing.T) {
-	runtimeDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	runtimeDir := xdgRuntimeDir(t)
 
 	r1 := &Runner{configPath: "/home/user/.config/shuttle/config.toml"}
 	r2 := &Runner{configPath: "/home/user/alt/shuttle/config.toml"}
@@ -490,14 +504,27 @@ func TestClassifyExitStatus(t *testing.T) {
 }
 
 func TestLockDir_HonorsXDGRuntimeDir(t *testing.T) {
-	runtimeDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	runtimeDir := xdgRuntimeDir(t)
 	got, err := lockDir()
 	if err != nil {
 		t.Fatalf("lockDir: %v", err)
 	}
 	if got != runtimeDir {
 		t.Errorf("lockDir() = %q, want %q", got, runtimeDir)
+	}
+}
+
+func TestLockDir_RejectsInsecureXDGRuntimeDir(t *testing.T) {
+	insecure := filepath.Join(t.TempDir(), "loose")
+	if err := os.Mkdir(insecure, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(insecure, 0o777); err != nil { // chmod defeats umask so group/other bits are actually set
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", insecure)
+	if _, err := lockDir(); err == nil {
+		t.Error("lockDir should reject a group/other-accessible XDG_RUNTIME_DIR")
 	}
 }
 
@@ -562,8 +589,7 @@ func TestEnsureSecureDir_RejectsInsecureDirs(t *testing.T) {
 }
 
 func TestAcquireLock_RejectsSymlinkedLockPath(t *testing.T) {
-	runtimeDir := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	xdgRuntimeDir(t)
 	r := &Runner{configPath: "/some/config.toml"}
 	lockPath, err := r.lockFilePath()
 	if err != nil {

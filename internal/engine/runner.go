@@ -480,14 +480,18 @@ func (r *Runner) collectFilterFiles(opts RunOptions) []string {
 const lockDirPerm os.FileMode = 0o700
 
 // lockDir returns the directory for the per-config lock file. It prefers
-// XDG_RUNTIME_DIR (guaranteed per-user, mode 0700 by the XDG spec); absent
-// that, it uses a per-user "shuttle-<uid>" subdirectory under os.TempDir(),
-// created and verified mode 0700 by ensureSecureDir.
+// XDG_RUNTIME_DIR; absent that, a per-user "shuttle-<uid>" subdirectory under
+// os.TempDir(). Both paths are run through ensureSecureDir, which creates a
+// missing directory mode 0700 and fails closed on a symlink, non-directory,
+// group/other-accessible, or foreign-owned one. XDG_RUNTIME_DIR is per-user
+// mode 0700 by the XDG spec, but it is an environment value, so it is verified
+// to the same bar rather than trusted blind; ensureSecureDir is a no-op on an
+// already-valid directory.
 func lockDir() (string, error) {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return dir, nil
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%d", os.Getuid()))
 	}
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%d", os.Getuid()))
 	if err := ensureSecureDir(dir); err != nil {
 		return "", err
 	}
