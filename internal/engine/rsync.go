@@ -64,17 +64,18 @@ func parseRsyncProgress(segment string) string {
 	return strings.Join(parts, ", ")
 }
 
-// scanRsyncProgress reads rsync stdout from r, writes all bytes to capture
-// (preserving raw output for ParseRsyncStats), and extracts progress updates
-// from \r-delimited segments. Each progress update is passed to onProgress.
-// If onProgress is nil, bytes are still written to capture but no parsing occurs.
-func scanRsyncProgress(r io.Reader, capture *bytes.Buffer, onProgress func(string)) {
+// scanRsyncProgress reads rsync stdout from r, writes the byte stream to
+// capture (preserving output for ParseRsyncStats), and extracts progress
+// updates from \r-delimited segments. Each progress update is passed to
+// onProgress. If onProgress is nil, bytes are still written to capture but no
+// parsing occurs.
+func scanRsyncProgress(r io.Reader, capture io.Writer, onProgress func(string)) {
 	buf := make([]byte, 4096)
 	var segment []byte
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			capture.Write(buf[:n])
+			_, _ = capture.Write(buf[:n])
 
 			if onProgress != nil {
 				for _, b := range buf[:n] {
@@ -98,6 +99,43 @@ func scanRsyncProgress(r io.Reader, capture *bytes.Buffer, onProgress func(strin
 	}
 }
 
+// rsyncCaptureTailBytes bounds in-memory capture of rsync stdout. Only the
+// trailing --stats block (~600 bytes) is parsed after the run; without a
+// bound, user flags like -v make the captured listing grow with file count.
+const rsyncCaptureTailBytes = 64 * 1024
+
+// tailBuffer is an io.Writer retaining only the last capacity bytes written.
+// Hand-rolled because the stdlib has no bounded byte-tail writer:
+// bytes.Buffer is unbounded and container/ring is element-oriented.
+type tailBuffer struct {
+	capacity int
+	buf      []byte
+}
+
+func newTailBuffer(capacity int) *tailBuffer {
+	return &tailBuffer{capacity: capacity}
+}
+
+// Write keeps the suffix of the stream within capacity. It never fails; the
+// error return exists to satisfy io.Writer.
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	if len(p) >= t.capacity {
+		t.buf = append(t.buf[:0], p[len(p)-t.capacity:]...)
+		return len(p), nil
+	}
+	if overflow := len(t.buf) + len(p) - t.capacity; overflow > 0 {
+		t.buf = append(t.buf[:0], t.buf[overflow:]...)
+	}
+	t.buf = append(t.buf, p...)
+	return len(p), nil
+}
+
+// Bytes returns the retained tail. The slice aliases internal storage and is
+// valid until the next Write.
+func (t *tailBuffer) Bytes() []byte {
+	return t.buf
+}
+
 // Exec runs rsync with the given pre-assembled argument list.
 // Stdout is captured for stats parsing. If onProgress is non-nil, progress
 // updates from --info=progress2 are parsed in real-time and forwarded.
@@ -109,7 +147,7 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	name := filepath.Base(strings.TrimRight(source, "/"))
 
 	start := time.Now()
-	var capture bytes.Buffer
+	capture := newTailBuffer(rsyncCaptureTailBytes)
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -134,7 +172,7 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	pipeWg.Add(1)
 	go func() {
 		defer pipeWg.Done()
-		scanRsyncProgress(stdout, &capture, onProgress)
+		scanRsyncProgress(stdout, capture, onProgress)
 	}()
 
 	pipeWg.Wait()

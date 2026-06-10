@@ -235,3 +235,63 @@ func TestRsyncExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 		t.Errorf("Status = %q, want %q", result.Status, StatusTimedOut)
 	}
 }
+
+func TestTailBuffer_UnderCapacity_KeepsEverything(t *testing.T) {
+	tb := newTailBuffer(8)
+	_, _ = tb.Write([]byte("abc"))
+	_, _ = tb.Write([]byte("de"))
+	if got := string(tb.Bytes()); got != "abcde" {
+		t.Errorf("Bytes() = %q, want %q", got, "abcde")
+	}
+}
+
+func TestTailBuffer_ExactlyAtCapacity_KeepsEverything(t *testing.T) {
+	tb := newTailBuffer(4)
+	_, _ = tb.Write([]byte("abcd"))
+	if got := string(tb.Bytes()); got != "abcd" {
+		t.Errorf("Bytes() = %q, want %q", got, "abcd")
+	}
+}
+
+func TestTailBuffer_SingleWriteOverCapacity_KeepsTailOfWrite(t *testing.T) {
+	tb := newTailBuffer(4)
+	_, _ = tb.Write([]byte("abcdef"))
+	if got := string(tb.Bytes()); got != "cdef" {
+		t.Errorf("Bytes() = %q, want %q", got, "cdef")
+	}
+}
+
+func TestTailBuffer_MultiWriteWrap_KeepsLastBytes(t *testing.T) {
+	tb := newTailBuffer(5)
+	_, _ = tb.Write([]byte("abc"))
+	_, _ = tb.Write([]byte("def"))
+	if got := string(tb.Bytes()); got != "bcdef" {
+		t.Errorf("Bytes() = %q, want %q", got, "bcdef")
+	}
+	_, _ = tb.Write([]byte("XYZ"))
+	if got := string(tb.Bytes()); got != "efXYZ" {
+		t.Errorf("Bytes() = %q, want %q", got, "efXYZ")
+	}
+}
+
+func TestScanRsyncProgress_OverCapacityStream_StatsStillParsed(t *testing.T) {
+	// Simulates a -v run whose file listing exceeds the capture bound: only
+	// the head may be dropped; the trailing stats block must survive.
+	listing := strings.Repeat("verbose-file-listing-line.txt\n", 4000) // ~120 KiB
+	stats := readFixture(t, "rsync_stats_transferred.txt")
+	r := strings.NewReader(listing + string(stats))
+	capture := newTailBuffer(rsyncCaptureTailBytes)
+
+	scanRsyncProgress(r, capture, nil)
+
+	parsed := ParseRsyncStats(capture.Bytes())
+	if parsed.FilesTransferred != 8 {
+		t.Errorf("FilesTransferred = %d, want 8", parsed.FilesTransferred)
+	}
+	if parsed.FilesChecked != 250 {
+		t.Errorf("FilesChecked = %d, want 250", parsed.FilesChecked)
+	}
+	if parsed.BytesSent != "45.35M" {
+		t.Errorf("BytesSent = %q, want %q", parsed.BytesSent, "45.35M")
+	}
+}
