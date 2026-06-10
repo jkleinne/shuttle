@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,7 +32,7 @@ func TestMain(m *testing.M) {
 
 	shuttleBin = filepath.Join(dir, "shuttle")
 	// Build from repo root; test files run from the package directory.
-	buildCmd := exec.Command("go", "build", "-o", shuttleBin, "./cmd/shuttle")
+	buildCmd := exec.Command("go", "build", "-race", "-o", shuttleBin, "./cmd/shuttle")
 	buildCmd.Dir = filepath.Join("..", "..")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building shuttle: %v\n%s\n", err, out)
@@ -876,4 +879,85 @@ func TestResolveRclonePassword_EnvPreset_ReturnsEmpty(t *testing.T) {
 	if v := os.Getenv("RCLONE_CONFIG_PASS"); v != "already-set" {
 		t.Errorf("RCLONE_CONFIG_PASS = %q, want unchanged 'already-set'", v)
 	}
+}
+
+// assertSignalExitsWithSignalCode verifies the public exit-code contract for
+// interrupted runs: the given signal during an active job yields exit 130 and
+// the interrupt notice on stderr. The job is throttled via --bwlimit so the
+// process is reliably still alive when the signal lands; the exit code is
+// 130 regardless of which pipeline stage the cancellation interrupts.
+func assertSignalExitsWithSignalCode(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	payload := make([]byte, 1<<20) // 1 MiB at --bwlimit=100 (KB/s) ≈ 10s window
+	if err := os.WriteFile(filepath.Join(src, "big.bin"), payload, 0o644); err != nil {
+		t.Fatalf("writing payload: %v", err)
+	}
+	dst := t.TempDir()
+
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "slow"
+engine = "rsync"
+sources = [%q]
+destination = %q
+extra_flags = ["--bwlimit=100"]
+`, filepath.Join(src, "big.bin"), dst))
+
+	cmd := exec.Command(shuttleBin, "run")
+	cmd.Env = env
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting shuttle: %v", err)
+	}
+
+	// Signal only after the run has observably started so the process
+	// cannot have exited before the kill lands.
+	scanner := bufio.NewScanner(stdout)
+	started := false
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "Shuttle Started") {
+			started = true
+			break
+		}
+	}
+	if !started {
+		_ = cmd.Process.Kill()
+		t.Fatalf("never saw startup line; stderr: %s", stderrBuf.String())
+	}
+	if err := cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("sending %v: %v", sig, err)
+	}
+	// Drain remaining stdout so the child never blocks on a full pipe.
+	go func() { _, _ = io.Copy(io.Discard, stdout) }()
+
+	err = cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Wait() = %v, want ExitError with code 130", err)
+	}
+	if code := exitErr.ExitCode(); code != 130 {
+		t.Errorf("exit code = %d, want 130; stderr: %s", code, stderrBuf.String())
+	}
+	if !strings.Contains(stderrBuf.String(), "Interrupted") {
+		t.Errorf("stderr = %q, want interrupt notice", stderrBuf.String())
+	}
+}
+
+func TestCLI_SIGINT_ExitsWithSignalCode(t *testing.T) {
+	assertSignalExitsWithSignalCode(t, syscall.SIGINT)
+}
+
+// SIGTERM is what cron and launchd send on shutdown, so the second registered
+// signal gets the same contract coverage as the interactive ctrl-C path.
+func TestCLI_SIGTERM_ExitsWithSignalCode(t *testing.T) {
+	assertSignalExitsWithSignalCode(t, syscall.SIGTERM)
 }
