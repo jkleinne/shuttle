@@ -861,3 +861,19 @@ optional = true
 		t.Errorf("stdout should not mention 'failed' when only optional-missing:\n%s", res.stdout)
 	}
 }
+
+func TestResolveRclonePassword_EnvPreset_ReturnsEmpty(t *testing.T) {
+	t.Setenv("RCLONE_CONFIG_PASS", "already-set")
+	logger, err := log.NewWithWriter(&bytes.Buffer{}, filepath.Join(t.TempDir(), "t.log"), false, log.VerbosityNormal)
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	defer logger.Close()
+
+	if got := resolveRclonePassword(logger); got != "" {
+		t.Errorf("resolveRclonePassword() = %q, want \"\" when env is preset", got)
+	}
+	if v := os.Getenv("RCLONE_CONFIG_PASS"); v != "already-set" {
+		t.Errorf("RCLONE_CONFIG_PASS = %q, want unchanged 'already-set'", v)
+	}
+}

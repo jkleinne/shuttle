@@ -65,20 +65,50 @@ func TestShouldRunJob_SkipLogic(t *testing.T) {
 	}
 }
 
+// xdgRuntimeDir returns a fresh 0700 directory and points XDG_RUNTIME_DIR at it
+// for the test's duration. t.TempDir() yields a 0755 directory on some
+// platforms, which lockDir now rejects (it verifies XDG_RUNTIME_DIR to the same
+// fail-closed bar as the fallback, matching the real XDG 0700 contract), so the
+// perms are tightened explicitly here.
+func xdgRuntimeDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	return dir
+}
+
 func TestLockFilePath_DifferentConfigs(t *testing.T) {
+	runtimeDir := xdgRuntimeDir(t)
+
 	r1 := &Runner{configPath: "/home/user/.config/shuttle/config.toml"}
 	r2 := &Runner{configPath: "/home/user/alt/shuttle/config.toml"}
 	r3 := &Runner{configPath: "/home/user/.config/shuttle/config.toml"}
 
-	if r1.lockFilePath() == r2.lockFilePath() {
+	p1, err := r1.lockFilePath()
+	if err != nil {
+		t.Fatalf("lockFilePath r1: %v", err)
+	}
+	p2, err := r2.lockFilePath()
+	if err != nil {
+		t.Fatalf("lockFilePath r2: %v", err)
+	}
+	p3, err := r3.lockFilePath()
+	if err != nil {
+		t.Fatalf("lockFilePath r3: %v", err)
+	}
+
+	if p1 == p2 {
 		t.Error("different config paths should produce different lock paths")
 	}
-	if r1.lockFilePath() != r3.lockFilePath() {
+	if p1 != p3 {
 		t.Error("same config path should produce same lock path")
 	}
-	wantPrefix := filepath.Join(os.TempDir(), "shuttle-")
-	if !strings.HasPrefix(r1.lockFilePath(), wantPrefix) {
-		t.Errorf("lock path should start with %q, got %q", wantPrefix, r1.lockFilePath())
+	wantPrefix := filepath.Join(runtimeDir, "shuttle-")
+	if !strings.HasPrefix(p1, wantPrefix) {
+		t.Errorf("lock path should start with %q, got %q", wantPrefix, p1)
 	}
 }
 
@@ -120,7 +150,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 		t.Fatalf("creating logger: %v", err)
 	}
 	pw := NewProgressWriter(io.Discard, false, false)
-	return NewRunner(&config.Config{}, "", logger, pw, false, logFile)
+	return NewRunner(RunnerConfig{Cfg: &config.Config{}, Logger: logger, Progress: pw, LogFile: logFile})
 }
 
 func TestRunRsyncJob_Optional_MissingSource_MarksOptionalMissing(t *testing.T) {
@@ -470,5 +500,106 @@ func TestClassifyExitStatus(t *testing.T) {
 				t.Errorf("classifyExitStatus(...) = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLockDir_HonorsXDGRuntimeDir(t *testing.T) {
+	runtimeDir := xdgRuntimeDir(t)
+	got, err := lockDir()
+	if err != nil {
+		t.Fatalf("lockDir: %v", err)
+	}
+	if got != runtimeDir {
+		t.Errorf("lockDir() = %q, want %q", got, runtimeDir)
+	}
+}
+
+func TestLockDir_RejectsInsecureXDGRuntimeDir(t *testing.T) {
+	insecure := filepath.Join(t.TempDir(), "loose")
+	if err := os.Mkdir(insecure, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(insecure, 0o777); err != nil { // chmod defeats umask so group/other bits are actually set
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", insecure)
+	if _, err := lockDir(); err == nil {
+		t.Error("lockDir should reject a group/other-accessible XDG_RUNTIME_DIR")
+	}
+}
+
+func TestLockDir_FallbackCreatesPrivateSubdir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("TMPDIR", t.TempDir()) // os.TempDir() reads $TMPDIR
+	got, err := lockDir()
+	if err != nil {
+		t.Fatalf("lockDir: %v", err)
+	}
+	info, err := os.Lstat(got)
+	if err != nil {
+		t.Fatalf("stat lock dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("lock dir is not a directory")
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("lock dir perm = %o, want 700", info.Mode().Perm())
+	}
+}
+
+func TestEnsureSecureDir_RejectsInsecureDirs(t *testing.T) {
+	t.Run("fresh dir created 0700", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "lock")
+		if err := ensureSecureDir(dir); err != nil {
+			t.Fatalf("ensureSecureDir: %v", err)
+		}
+		info, _ := os.Lstat(dir)
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("perm = %o, want 700", info.Mode().Perm())
+		}
+	})
+	t.Run("group/other-accessible rejected", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "loose")
+		if err := os.Mkdir(dir, 0o777); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := ensureSecureDir(dir); err == nil {
+			t.Error("expected error for 0777 dir")
+		}
+	})
+	t.Run("symlink rejected", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		if err := ensureSecureDir(link); err == nil {
+			t.Error("expected error for symlinked dir")
+		}
+	})
+	t.Run("non-directory rejected", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := ensureSecureDir(file); err == nil {
+			t.Error("expected error for non-directory")
+		}
+	})
+}
+
+func TestAcquireLock_RejectsSymlinkedLockPath(t *testing.T) {
+	xdgRuntimeDir(t)
+	r := &Runner{configPath: "/some/config.toml"}
+	lockPath, err := r.lockFilePath()
+	if err != nil {
+		t.Fatalf("lockFilePath: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), lockPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := r.acquireLock(); err == nil {
+		t.Error("acquireLock should reject a symlinked lock path (O_NOFOLLOW)")
+		_ = r.lockFile.Close()
 	}
 }

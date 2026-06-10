@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,23 +42,35 @@ type Runner struct {
 	lockFile   *os.File // held open to maintain flock; released on process exit
 }
 
-// NewRunner creates a Runner for the given config. configPath is the
-// absolute path to the config file (used for per-config locking).
-// pw controls live terminal progress display. If nil, a non-interactive
-// writer is created that prints plain status lines to io.Discard.
-func NewRunner(cfg *config.Config, configPath string, logger *log.Logger, pw *ProgressWriter, dryRun bool, logFile string) *Runner {
+// RunnerConfig carries the inputs needed to construct a Runner. Grouped into
+// a struct so the constructor stays within the project's argument-count
+// budget and so each call site names the field it sets at the boundary.
+type RunnerConfig struct {
+	Cfg            *config.Config
+	ConfigPath     string // absolute path to the config file (used for per-config locking)
+	Logger         *log.Logger
+	Progress       *ProgressWriter // live terminal display; nil yields a discard writer
+	DryRun         bool
+	LogFile        string
+	RclonePassword string // injected into rclone child processes only; empty means none
+}
+
+// NewRunner creates a Runner from rc. If rc.Progress is nil, a non-interactive
+// writer that prints plain status lines to io.Discard is used.
+func NewRunner(rc RunnerConfig) *Runner {
+	pw := rc.Progress
 	if pw == nil {
 		pw = NewProgressWriter(io.Discard, false, false)
 	}
 	return &Runner{
-		cfg:        cfg,
-		configPath: configPath,
-		logger:     logger,
+		cfg:        rc.Cfg,
+		configPath: rc.ConfigPath,
+		logger:     rc.Logger,
 		pw:         pw,
-		rsync:      NewRsyncExecutor(logger),
-		rclone:     NewRcloneExecutor(logger, logFile),
-		dryRun:     dryRun,
-		logFile:    logFile,
+		rsync:      NewRsyncExecutor(rc.Logger),
+		rclone:     NewRcloneExecutor(rc.Logger, rc.LogFile, rc.RclonePassword),
+		dryRun:     rc.DryRun,
+		logFile:    rc.LogFile,
 	}
 }
 
@@ -462,12 +475,65 @@ func (r *Runner) collectFilterFiles(opts RunOptions) []string {
 	})
 }
 
+// lockDirPerm is the owner-only mode for the per-user lock directory: no group
+// or other access, so a different local user cannot read or plant entries in it.
+const lockDirPerm os.FileMode = 0o700
+
+// lockDir returns the directory for the per-config lock file. It prefers
+// XDG_RUNTIME_DIR; absent that, a per-user "shuttle-<uid>" subdirectory under
+// os.TempDir(). Both paths are run through ensureSecureDir, which creates a
+// missing directory mode 0700 and fails closed on a symlink, non-directory,
+// group/other-accessible, or foreign-owned one. XDG_RUNTIME_DIR is per-user
+// mode 0700 by the XDG spec, but it is an environment value, so it is verified
+// to the same bar rather than trusted blind; ensureSecureDir is a no-op on an
+// already-valid directory.
+func lockDir() (string, error) {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%d", os.Getuid()))
+	}
+	if err := ensureSecureDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// ensureSecureDir creates dir mode 0700 if absent, or verifies an existing dir
+// is a real directory (not a symlink), owned by the current user, with no
+// group/other access. It fails closed: an insecure pre-existing path is an
+// error, never silently reused.
+func ensureSecureDir(dir string) error {
+	fi, err := os.Lstat(dir) // Lstat so a planted symlink is detected, not followed
+	if errors.Is(err, fs.ErrNotExist) {
+		return os.Mkdir(dir, lockDirPerm) // parent TempDir already exists; create the leaf only
+	}
+	if err != nil {
+		return fmt.Errorf("checking lock dir %s: %w", dir, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("lock dir %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("lock dir %s is not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("lock dir %s is group/other-accessible (%o)", dir, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("lock dir %s not owned by current user", dir)
+	}
+	return nil
+}
+
 // acquireLock obtains an exclusive, non-blocking file lock via syscall.Flock.
-// The lock file path is derived from the config file path so that different
-// configs can run concurrently.
+// The lock file lives in a per-user runtime directory (see lockDir) and is
+// opened O_NOFOLLOW so a symlink planted at the path cannot redirect the open.
 func (r *Runner) acquireLock() error {
-	lockPath := r.lockFilePath()
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockPath, err := r.lockFilePath()
+	if err != nil {
+		return fmt.Errorf("resolving lock path: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
@@ -479,11 +545,16 @@ func (r *Runner) acquireLock() error {
 	return nil
 }
 
-// lockFilePath returns <tempdir>/shuttle-<hash>.lock where hash is the first
-// 8 hex characters of SHA-256 of the absolute config file path.
-func (r *Runner) lockFilePath() string {
+// lockFilePath returns <lockDir>/shuttle-<hash>.lock where hash is the first
+// 8 hex characters of SHA-256 of the absolute config file path, keeping the
+// lock per-config while the directory is per-user.
+func (r *Runner) lockFilePath() (string, error) {
+	dir, err := lockDir()
+	if err != nil {
+		return "", err
+	}
 	h := sha256.Sum256([]byte(r.configPath))
-	return filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%x.lock", h[:4]))
+	return filepath.Join(dir, fmt.Sprintf("shuttle-%x.lock", h[:4])), nil
 }
 
 // targetRemotes returns the intersection of the job's remotes and the
