@@ -186,7 +186,7 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 	if r.cfg.Defaults != nil {
 		rcloneDefaults = r.cfg.Defaults.Rclone
 	}
-	WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
+	WarnFlagConflicts(r.logger, config.EngineRclone, collectRcloneUserFlags(rcloneDefaults, job))
 
 	remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
 	if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
@@ -275,7 +275,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		defaults = r.cfg.Defaults.Rsync
 	}
 
-	WarnFlagConflicts(r.logger, "rsync", collectRsyncUserFlags(defaults, job))
+	WarnFlagConflicts(r.logger, config.EngineRsync, collectRsyncUserFlags(defaults, job))
 
 	multiSource := len(job.Sources) > 1
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
@@ -212,11 +213,13 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 //
 //	remote:<backup_path>/<run_timestamp>/<dest_subpath>/
 func selectMode(mode, destination, remoteName, backupPath, runTimestamp string, isDir bool, logger *log.Logger) (subcommand, backupDirArg string) {
-	if mode == "copy" || !isDir {
-		if mode == "sync" && !isDir {
+	if mode == config.ModeCopy || !isDir {
+		if mode == config.ModeSync && !isDir {
 			logger.Info("mode is 'sync' but source is a file; using 'rclone copy'")
 		}
-		return "copy", ""
+		// config.ModeCopy/ModeSync double as the rclone subcommand spellings,
+		// so the mode constant is returned directly as the subcommand.
+		return config.ModeCopy, ""
 	}
 
 	if backupPath != "" {
@@ -228,10 +231,10 @@ func selectMode(mode, destination, remoteName, backupPath, runTimestamp string, 
 			runTimestamp,
 			destSubpath,
 		)
-		return "sync", backupDir
+		return config.ModeSync, backupDir
 	}
 
-	return "sync", ""
+	return config.ModeSync, ""
 }
 
 // archiveDateLayout is the date prefix on archive directory names; the run

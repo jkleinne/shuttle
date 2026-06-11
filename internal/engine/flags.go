@@ -129,14 +129,17 @@ func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job con
 // stats capture and progress display; user flags that duplicate them may produce
 // unexpected output or break stats parsing.
 //
-// engineName must be "rsync" or "rclone". userFlags are the extra_flags values
+// engineName is config.EngineRsync or config.EngineRclone; anything else warns about nothing. userFlags are the extra_flags values
 // from the job config.
 func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string) {
 	var keys []string
-	if engineName == "rsync" {
+	switch engineName {
+	case config.EngineRsync:
 		keys = rsyncInstrumentationKeys
-	} else {
+	case config.EngineRclone:
 		keys = rcloneInstrumentationKeys
+	default:
+		return // unknown engine: no instrumentation keys to conflict with
 	}
 
 	for _, flag := range userFlags {

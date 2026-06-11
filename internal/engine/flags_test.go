@@ -247,7 +247,7 @@ func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"-a", "--stats", "-v"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "--stats", "-v"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --stats, got %q", buf.String())
 	}
@@ -262,7 +262,7 @@ func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"--info=progress2"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"--info=progress2"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --info=progress2, got %q", buf.String())
 	}
@@ -277,7 +277,7 @@ func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rclone", []string{"--log-file=/custom/path.log"})
+	WarnFlagConflicts(logger, config.EngineRclone, []string{"--log-file=/custom/path.log"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --log-file=..., got %q", buf.String())
 	}
@@ -292,8 +292,25 @@ func TestWarnFlagConflicts_NoConflict(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"-a", "-v", "-h"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "-v", "-h"})
 	if strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("unexpected conflict warning for safe flags: %q", buf.String())
+	}
+}
+
+func TestWarnFlagConflicts_UnknownEngine_NoWarning(t *testing.T) {
+	var buf strings.Builder
+	logPath := filepath.Join(t.TempDir(), "test.log")
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
+	if err != nil {
+		t.Fatalf("creating logger: %v", err)
+	}
+	defer logger.Close()
+
+	// An unrecognized engine must match no instrumentation keys at all,
+	// not silently fall through to rclone's.
+	WarnFlagConflicts(logger, "tarsnap", []string{"--stats", "--log-file=/x"})
+	if strings.Contains(buf.String(), "conflicts") {
+		t.Errorf("unknown engine should produce no conflict warnings, got %q", buf.String())
 	}
 }
