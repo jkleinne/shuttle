@@ -97,14 +97,13 @@ func TestBuildRsyncArgs_LogFile(t *testing.T) {
 
 func TestBuildRcloneArgs_DefaultsAndOverrides(t *testing.T) {
 	defaults := &config.RcloneDefaults{
-		Flags:      []string{"--copy-links", "--fast-list"},
-		FilterFile: "/tmp/filters.txt",
-		Transfers:  6,
-		Bwlimit:    "5.5M",
+		Flags:        []string{"--copy-links", "--fast-list"},
+		FilterFile:   "/tmp/filters.txt",
+		RcloneTuning: config.RcloneTuning{Transfers: 6, Bwlimit: "5.5M"},
 	}
 	job := config.Job{
-		Bwlimit:    "2M", // per-job override
-		ExtraFlags: []string{"--track-renames"},
+		RcloneTuning: config.RcloneTuning{Bwlimit: "2M"}, // per-job override
+		ExtraFlags:   []string{"--track-renames"},
 	}
 	args := BuildRcloneArgs("copy", defaults, job, "/src/", "remote:dst/", false, "/tmp/log", "")
 	joined := strings.Join(args, " ")
@@ -205,19 +204,14 @@ func TestBuildRcloneArgs_DryRun(t *testing.T) {
 }
 
 func TestBuildTuningFlags_ZeroValuesOmitted(t *testing.T) {
-	defaults := &config.RcloneDefaults{
-		Transfers: 0,
-		Bwlimit:   "",
-		UseMmap:   false,
-	}
-	flags := buildTuningFlags(defaults)
+	flags := buildTuningFlags(config.RcloneTuning{})
 	if len(flags) != 0 {
 		t.Errorf("expected no flags for zero values, got %v", flags)
 	}
 }
 
 func TestBuildTuningFlags_AllFields(t *testing.T) {
-	defaults := &config.RcloneDefaults{
+	tuning := config.RcloneTuning{
 		Transfers:       4,
 		Checkers:        8,
 		Bwlimit:         "10M",
@@ -229,7 +223,7 @@ func TestBuildTuningFlags_AllFields(t *testing.T) {
 		LowLevelRetries: 10,
 		OrderBy:         "size,desc",
 	}
-	flags := buildTuningFlags(defaults)
+	flags := buildTuningFlags(tuning)
 	joined := strings.Join(flags, " ")
 	expects := []string{
 		"--transfers 4", "--checkers 8", "--bwlimit 10M",
@@ -301,32 +295,5 @@ func TestWarnFlagConflicts_NoConflict(t *testing.T) {
 	WarnFlagConflicts(logger, "rsync", []string{"-a", "-v", "-h"})
 	if strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("unexpected conflict warning for safe flags: %q", buf.String())
-	}
-}
-
-func TestBuildJobTuningFlags_OnlyOverrides(t *testing.T) {
-	job := config.Job{
-		Bwlimit:   "2M",
-		Transfers: 3,
-	}
-	flags := buildJobTuningFlags(job)
-	joined := strings.Join(flags, " ")
-	if !strings.Contains(joined, "--bwlimit 2M") {
-		t.Error("missing --bwlimit from job override")
-	}
-	if !strings.Contains(joined, "--transfers 3") {
-		t.Error("missing --transfers from job override")
-	}
-	// Fields not set on job must not appear.
-	if strings.Contains(joined, "--checkers") {
-		t.Error("--checkers should not appear when not overridden")
-	}
-}
-
-func TestBuildJobTuningFlags_ZeroValuesOmitted(t *testing.T) {
-	job := config.Job{} // all zero values
-	flags := buildJobTuningFlags(job)
-	if len(flags) != 0 {
-		t.Errorf("expected no flags for zero-value job, got %v", flags)
 	}
 }

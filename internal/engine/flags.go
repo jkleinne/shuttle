@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jkleinne/shuttle/internal/config"
@@ -86,14 +87,14 @@ func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job con
 
 	// 3. Default tuning from [defaults.rclone] tuning fields.
 	if defaults != nil {
-		args = append(args, buildTuningFlags(defaults)...)
+		args = append(args, buildTuningFlags(defaults.RcloneTuning)...)
 	}
 
 	// 4. Per-job extra_flags.
 	args = append(args, job.ExtraFlags...)
 
 	// 5. Per-job tuning overrides (applied after defaults; last-flag-wins).
-	args = append(args, buildJobTuningFlags(job)...)
+	args = append(args, buildTuningFlags(job.RcloneTuning)...)
 
 	// 6. Filter file: job-level overrides default.
 	filterFile := ""
@@ -150,77 +151,41 @@ func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string
 	}
 }
 
-// buildTuningFlags translates RcloneDefaults tuning fields into rclone flag
-// strings. Zero-value fields (0, "", false) produce no output.
-func buildTuningFlags(d *config.RcloneDefaults) []string {
+// buildTuningFlags translates RcloneTuning fields into rclone flag strings.
+// Zero-value fields (0, "", false) produce no output, so an unset override
+// never shadows a default. Called twice by BuildRcloneArgs — defaults first,
+// then the job's overrides — so rclone's last-flag-wins applies.
+func buildTuningFlags(t config.RcloneTuning) []string {
 	var flags []string
-	if d.Transfers > 0 {
-		flags = append(flags, "--transfers", fmt.Sprintf("%d", d.Transfers))
+	if t.Transfers > 0 {
+		flags = append(flags, "--transfers", strconv.Itoa(t.Transfers))
 	}
-	if d.Checkers > 0 {
-		flags = append(flags, "--checkers", fmt.Sprintf("%d", d.Checkers))
+	if t.Checkers > 0 {
+		flags = append(flags, "--checkers", strconv.Itoa(t.Checkers))
 	}
-	if d.Bwlimit != "" {
-		flags = append(flags, "--bwlimit", d.Bwlimit)
+	if t.Bwlimit != "" {
+		flags = append(flags, "--bwlimit", t.Bwlimit)
 	}
-	if d.DriveChunkSize != "" {
-		flags = append(flags, "--drive-chunk-size", d.DriveChunkSize)
+	if t.DriveChunkSize != "" {
+		flags = append(flags, "--drive-chunk-size", t.DriveChunkSize)
 	}
-	if d.BufferSize != "" {
-		flags = append(flags, "--buffer-size", d.BufferSize)
+	if t.BufferSize != "" {
+		flags = append(flags, "--buffer-size", t.BufferSize)
 	}
-	if d.UseMmap {
+	if t.UseMmap {
 		flags = append(flags, "--use-mmap")
 	}
-	if d.Timeout != "" {
-		flags = append(flags, "--timeout", d.Timeout)
+	if t.Timeout != "" {
+		flags = append(flags, "--timeout", t.Timeout)
 	}
-	if d.Contimeout != "" {
-		flags = append(flags, "--contimeout", d.Contimeout)
+	if t.Contimeout != "" {
+		flags = append(flags, "--contimeout", t.Contimeout)
 	}
-	if d.LowLevelRetries > 0 {
-		flags = append(flags, "--low-level-retries", fmt.Sprintf("%d", d.LowLevelRetries))
+	if t.LowLevelRetries > 0 {
+		flags = append(flags, "--low-level-retries", strconv.Itoa(t.LowLevelRetries))
 	}
-	if d.OrderBy != "" {
-		flags = append(flags, "--order-by", d.OrderBy)
-	}
-	return flags
-}
-
-// buildJobTuningFlags translates per-job tuning override fields into rclone
-// flags. Only non-zero fields produce output, so unset overrides do not shadow
-// the defaults.
-func buildJobTuningFlags(job config.Job) []string {
-	var flags []string
-	if job.Transfers > 0 {
-		flags = append(flags, "--transfers", fmt.Sprintf("%d", job.Transfers))
-	}
-	if job.Checkers > 0 {
-		flags = append(flags, "--checkers", fmt.Sprintf("%d", job.Checkers))
-	}
-	if job.Bwlimit != "" {
-		flags = append(flags, "--bwlimit", job.Bwlimit)
-	}
-	if job.DriveChunkSize != "" {
-		flags = append(flags, "--drive-chunk-size", job.DriveChunkSize)
-	}
-	if job.BufferSize != "" {
-		flags = append(flags, "--buffer-size", job.BufferSize)
-	}
-	if job.UseMmap {
-		flags = append(flags, "--use-mmap")
-	}
-	if job.Timeout != "" {
-		flags = append(flags, "--timeout", job.Timeout)
-	}
-	if job.Contimeout != "" {
-		flags = append(flags, "--contimeout", job.Contimeout)
-	}
-	if job.LowLevelRetries > 0 {
-		flags = append(flags, "--low-level-retries", fmt.Sprintf("%d", job.LowLevelRetries))
-	}
-	if job.OrderBy != "" {
-		flags = append(flags, "--order-by", job.OrderBy)
+	if t.OrderBy != "" {
+		flags = append(flags, "--order-by", t.OrderBy)
 	}
 	return flags
 }
