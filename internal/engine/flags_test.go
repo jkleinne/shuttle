@@ -17,7 +17,7 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 		Delete:     true,
 		ExtraFlags: []string{"--exclude=.*"},
 	}
-	args := BuildRsyncArgs(defaults, job, "/src/", "/dst/", true, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Job: job, Source: "/src/", Destination: "/dst/", IsDeleteDir: true})
 	joined := strings.Join(args, " ")
 
 	// Instrumentation must be present.
@@ -46,7 +46,7 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_NoDefaults(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst"})
 	// Instrumentation flags must appear even when no defaults are provided.
 	found := false
 	for _, a := range args {
@@ -60,7 +60,7 @@ func TestBuildRsyncArgs_NoDefaults(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_DryRun(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, true, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst", DryRun: true})
 	found := false
 	for _, a := range args {
 		if a == "--dry-run" {
@@ -75,7 +75,7 @@ func TestBuildRsyncArgs_DryRun(t *testing.T) {
 func TestBuildRsyncArgs_DeleteNotAppliedToFile(t *testing.T) {
 	// isDeleteDir=false: --delete-after must not appear even when job.Delete is true.
 	job := config.Job{Delete: true}
-	args := BuildRsyncArgs(nil, job, "/src/file.txt", "/dst/", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Job: job, Source: "/src/file.txt", Destination: "/dst/"})
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--delete-after") {
 		t.Error("--delete-after must not appear when isDeleteDir is false")
@@ -83,7 +83,7 @@ func TestBuildRsyncArgs_DeleteNotAppliedToFile(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_LogFile(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, false, "/tmp/shuttle.log")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst", LogFile: "/tmp/shuttle.log"})
 	found := false
 	for _, a := range args {
 		if strings.HasPrefix(a, "--log-file=") {
@@ -105,7 +105,7 @@ func TestBuildRcloneArgs_DefaultsAndOverrides(t *testing.T) {
 		RcloneTuning: config.RcloneTuning{Bwlimit: "2M"}, // per-job override
 		ExtraFlags:   []string{"--track-renames"},
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src/", "remote:dst/", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src/", Destination: "remote:dst/", LogFile: "/tmp/log"})
 	joined := strings.Join(args, " ")
 
 	// Subcommand is first.
@@ -147,7 +147,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 	job := config.Job{
 		FilterFile: "/job/filters.txt",
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src", "remote:dst", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
 	// The job-level filter file should be used; the default must not appear.
 	found := false
 	for i, a := range args {
@@ -166,7 +166,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--stats 1s") {
 		t.Error("missing instrumentation --stats 1s")
@@ -183,7 +183,7 @@ func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_BackupDir(t *testing.T) {
-	args := BuildRcloneArgs("sync", nil, config.Job{}, "/src", "remote:dst", false, "", "remote:_archive/2026-01-01/dst/")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Source: "/src", Destination: "remote:dst", BackupDirArg: "remote:_archive/2026-01-01/dst/"})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--backup-dir remote:_archive/2026-01-01/dst/") {
 		t.Errorf("missing --backup-dir in args: %q", joined)
@@ -191,7 +191,7 @@ func TestBuildRcloneArgs_BackupDir(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_DryRun(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", true, "", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst", DryRun: true})
 	found := false
 	for _, a := range args {
 		if a == "--dry-run" {

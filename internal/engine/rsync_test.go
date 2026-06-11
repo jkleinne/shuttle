@@ -34,7 +34,7 @@ func TestRsyncExec_TransfersFiles(t *testing.T) {
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{}
-	args := BuildRsyncArgs(defaults, job, src+"/", dst+"/", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Job: job, Source: src + "/", Destination: dst + "/"})
 
 	executor := NewRsyncExecutor(newTestLogger(t))
 	result := executor.Exec(context.Background(), args, nil)
@@ -62,7 +62,7 @@ func TestRsyncExec_DryRun_DoesNotTransfer(t *testing.T) {
 	}
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
-	args := BuildRsyncArgs(defaults, config.Job{}, src+"/", dst+"/", false, true, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Source: src + "/", Destination: dst + "/", DryRun: true})
 
 	executor := NewRsyncExecutor(newTestLogger(t))
 	result := executor.Exec(context.Background(), args, nil)
@@ -91,7 +91,7 @@ func TestRsyncExec_DeleteAfter_ForDirectories(t *testing.T) {
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{Delete: true}
-	args := BuildRsyncArgs(defaults, job, src+"/", dst+"/", true, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Job: job, Source: src + "/", Destination: dst + "/", IsDeleteDir: true})
 
 	executor := NewRsyncExecutor(newTestLogger(t))
 	result := executor.Exec(context.Background(), args, nil)
@@ -119,7 +119,7 @@ func TestRsyncExec_ExtraOpts_Applied(t *testing.T) {
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a", "-v", "-h", "-P"}}
 	job := config.Job{ExtraFlags: []string{"--exclude=.*"}}
-	args := BuildRsyncArgs(defaults, job, src+"/", dst+"/", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Job: job, Source: src + "/", Destination: dst + "/"})
 
 	executor := NewRsyncExecutor(newTestLogger(t))
 	result := executor.Exec(context.Background(), args, nil)
@@ -226,7 +226,7 @@ func TestRsyncExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 	defer cancel()
 
 	defaults := &config.RsyncDefaults{Flags: []string{"-a"}}
-	args := BuildRsyncArgs(defaults, config.Job{}, src+"/", dst+"/", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Source: src + "/", Destination: dst + "/"})
 
 	executor := NewRsyncExecutor(newTestLogger(t))
 	result := executor.Exec(ctx, args, nil)
