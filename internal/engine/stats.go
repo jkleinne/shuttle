@@ -51,8 +51,8 @@ type TransferStats struct {
 	FilesChecked     int
 	FilesTransferred int
 	FilesDeleted     int
-	BytesSent        string        // human-readable, e.g. "234.5 MiB"
-	Speed            string        // e.g. "5.6 MiB/s"
+	BytesSent        string // human-readable, e.g. "234.5 MiB"
+	Speed            string // e.g. "5.6 MiB/s"
 	Elapsed          time.Duration
 }
 

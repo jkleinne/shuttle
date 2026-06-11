@@ -57,20 +57,28 @@ type RsyncDefaults struct {
 	Flags []string `toml:"flags"`
 }
 
+// RcloneTuning holds the rclone performance/transfer knobs shared by
+// [defaults.rclone] and per-job overrides. Embedded anonymously in
+// RcloneDefaults and Job so the flat TOML keys (transfers, bwlimit, ...)
+// keep parsing identically while the field set is declared once.
+type RcloneTuning struct {
+	Transfers       int    `toml:"transfers"`
+	Checkers        int    `toml:"checkers"`
+	Bwlimit         string `toml:"bwlimit"`
+	DriveChunkSize  string `toml:"drive_chunk_size"`
+	BufferSize      string `toml:"buffer_size"`
+	UseMmap         bool   `toml:"use_mmap"`
+	Timeout         string `toml:"timeout"`
+	Contimeout      string `toml:"contimeout"`
+	LowLevelRetries int    `toml:"low_level_retries"`
+	OrderBy         string `toml:"order_by"`
+}
+
 // RcloneDefaults holds default flags and tuning for all rclone jobs.
 type RcloneDefaults struct {
-	Flags           []string `toml:"flags"`
-	FilterFile      string   `toml:"filter_file"`
-	Transfers       int      `toml:"transfers"`
-	Checkers        int      `toml:"checkers"`
-	Bwlimit         string   `toml:"bwlimit"`
-	DriveChunkSize  string   `toml:"drive_chunk_size"`
-	BufferSize      string   `toml:"buffer_size"`
-	UseMmap         bool     `toml:"use_mmap"`
-	Timeout         string   `toml:"timeout"`
-	Contimeout      string   `toml:"contimeout"`
-	LowLevelRetries int      `toml:"low_level_retries"`
-	OrderBy         string   `toml:"order_by"`
+	Flags      []string `toml:"flags"`
+	FilterFile string   `toml:"filter_file"`
+	RcloneTuning
 }
 
 // Job defines a single backup/sync operation. The Engine field determines
@@ -112,17 +120,9 @@ type Job struct {
 	AllowDestructive bool   `toml:"allow_destructive"`
 	FilterFile       string `toml:"filter_file"`
 
-	// Rclone per-job tuning overrides
-	Transfers       int    `toml:"transfers"`
-	Checkers        int    `toml:"checkers"`
-	Bwlimit         string `toml:"bwlimit"`
-	DriveChunkSize  string `toml:"drive_chunk_size"`
-	BufferSize      string `toml:"buffer_size"`
-	UseMmap         bool   `toml:"use_mmap"`
-	Timeout         string `toml:"timeout"`
-	Contimeout      string `toml:"contimeout"`
-	LowLevelRetries int    `toml:"low_level_retries"`
-	OrderBy         string `toml:"order_by"`
+	// Rclone per-job tuning overrides (same knobs as [defaults.rclone];
+	// non-zero values win via last-flag-wins in BuildRcloneArgs).
+	RcloneTuning
 }
 
 // LoadFile reads and parses a TOML config file from disk.

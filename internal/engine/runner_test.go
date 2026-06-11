@@ -457,10 +457,10 @@ func TestClassifyExitStatus(t *testing.T) {
 	defer deadlineFirstCancel()
 
 	tests := []struct {
-		name    string
-		ctx     context.Context
-		runErr  error
-		want    Status
+		name   string
+		ctx    context.Context
+		runErr error
+		want   Status
 	}{
 		{
 			name:   "ok context, nil error",
@@ -475,8 +475,12 @@ func TestClassifyExitStatus(t *testing.T) {
 			want:   StatusFailed,
 		},
 		{
-			name:   "deadline exceeded context, non-nil error",
-			ctx:    func() context.Context { c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second)); t.Cleanup(cancel); return c }(),
+			name: "deadline exceeded context, non-nil error",
+			ctx: func() context.Context {
+				c, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+				t.Cleanup(cancel)
+				return c
+			}(),
 			runErr: someErr,
 			want:   StatusTimedOut,
 		},

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jkleinne/shuttle/internal/config"
@@ -21,42 +22,66 @@ var rsyncInstrumentationKeys = []string{"--stats", "--info=progress2"}
 // about conflicts in rclone extra_flags.
 var rcloneInstrumentationKeys = []string{"--stats", "--log-file", "--log-level"}
 
+// RsyncArgsRequest carries the inputs for one rsync argument assembly.
+// Grouped into a struct (mirroring RunnerConfig) so call sites name each
+// input and the builder stays within the project's argument-count budget.
+type RsyncArgsRequest struct {
+	Defaults    *config.RsyncDefaults
+	Job         config.Job
+	Source      string
+	Destination string
+	IsDeleteDir bool // guards --delete-after; never set for single-file sources
+	DryRun      bool
+	LogFile     string
+}
+
 // BuildRsyncArgs assembles the full argument list for an rsync invocation.
 // Order: instrumentation (lowest precedence) → default flags → per-job
 // extra_flags → behavioral flags (delete, dry-run, log-file) → source → dest.
 //
 // Instrumentation flags come first so user flags can override via last-flag-wins
-// rsync semantics. isDeleteDir guards --delete-after so it is never applied when
-// the source is a single file.
-func BuildRsyncArgs(defaults *config.RsyncDefaults, job config.Job, source, destination string, isDeleteDir, dryRun bool, logFile string) []string {
+// rsync semantics.
+func BuildRsyncArgs(req RsyncArgsRequest) []string {
 	args := make([]string, 0, 20)
 
 	// 1. Instrumentation (lowest precedence; user flags may shadow them).
 	args = append(args, rsyncInstrumentationFlags...)
 
 	// 2. Default flags from [defaults.rsync].
-	if defaults != nil {
-		args = append(args, defaults.Flags...)
+	if req.Defaults != nil {
+		args = append(args, req.Defaults.Flags...)
 	}
 
 	// 3. Per-job extra_flags.
-	args = append(args, job.ExtraFlags...)
+	args = append(args, req.Job.ExtraFlags...)
 
 	// 4. Behavioral flags.
-	if job.Delete && isDeleteDir {
+	if req.Job.Delete && req.IsDeleteDir {
 		args = append(args, "--delete-after")
 	}
-	if dryRun {
+	if req.DryRun {
 		args = append(args, "--dry-run")
 	}
-	if logFile != "" {
-		args = append(args, "--log-file="+logFile)
+	if req.LogFile != "" {
+		args = append(args, "--log-file="+req.LogFile)
 	}
 
 	// 5. Source and destination are always last.
-	args = append(args, source, destination)
+	args = append(args, req.Source, req.Destination)
 
 	return args
+}
+
+// RcloneArgsRequest carries the inputs for one rclone argument assembly.
+type RcloneArgsRequest struct {
+	Subcommand   string // rclone subcommand (config.ModeCopy or config.ModeSync spelling)
+	Defaults     *config.RcloneDefaults
+	Job          config.Job
+	Source       string
+	Destination  string
+	DryRun       bool
+	LogFile      string
+	BackupDirArg string // pre-built --backup-dir value; empty omits the flag
 }
 
 // BuildRcloneArgs assembles the full argument list for an rclone invocation.
@@ -65,60 +90,57 @@ func BuildRsyncArgs(defaults *config.RsyncDefaults, job config.Job, source, dest
 // dry-run → source → dest.
 //
 // Per-job tuning overrides appear after default tuning so rclone's last-flag-wins
-// behaviour applies. backupDirArg is the pre-built "--backup-dir" value (or empty
-// to omit it); the caller is responsible for constructing this string.
-func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job config.Job, source, destination string, dryRun bool, logFile string, backupDirArg string) []string {
+// behaviour applies. The caller is responsible for constructing BackupDirArg.
+func BuildRcloneArgs(req RcloneArgsRequest) []string {
 	args := make([]string, 0, 40)
 
-	// The subcommand (copy/sync) is always first.
-	args = append(args, subcommand)
-
-	// 1. Instrumentation.
-	args = append(args, "--stats", "1s", "-P")
-	if logFile != "" {
-		args = append(args, "--log-file", logFile, "--log-level", "INFO")
+	// The subcommand (copy/sync) is always first, immediately followed by
+	// instrumentation flags (step 1).
+	args = append(args, req.Subcommand, "--stats", "1s", "-P")
+	if req.LogFile != "" {
+		args = append(args, "--log-file", req.LogFile, "--log-level", "INFO")
 	}
 
 	// 2. Default flags from [defaults.rclone].
-	if defaults != nil {
-		args = append(args, defaults.Flags...)
+	if req.Defaults != nil {
+		args = append(args, req.Defaults.Flags...)
 	}
 
 	// 3. Default tuning from [defaults.rclone] tuning fields.
-	if defaults != nil {
-		args = append(args, buildTuningFlags(defaults)...)
+	if req.Defaults != nil {
+		args = append(args, buildTuningFlags(req.Defaults.RcloneTuning)...)
 	}
 
 	// 4. Per-job extra_flags.
-	args = append(args, job.ExtraFlags...)
+	args = append(args, req.Job.ExtraFlags...)
 
 	// 5. Per-job tuning overrides (applied after defaults; last-flag-wins).
-	args = append(args, buildJobTuningFlags(job)...)
+	args = append(args, buildTuningFlags(req.Job.RcloneTuning)...)
 
 	// 6. Filter file: job-level overrides default.
 	filterFile := ""
-	if defaults != nil {
-		filterFile = defaults.FilterFile
+	if req.Defaults != nil {
+		filterFile = req.Defaults.FilterFile
 	}
-	if job.FilterFile != "" {
-		filterFile = job.FilterFile
+	if req.Job.FilterFile != "" {
+		filterFile = req.Job.FilterFile
 	}
 	if filterFile != "" {
 		args = append(args, "--filter-from", filterFile)
 	}
 
 	// 7. Backup dir (pre-built by caller; empty means omit).
-	if backupDirArg != "" {
-		args = append(args, "--backup-dir", backupDirArg)
+	if req.BackupDirArg != "" {
+		args = append(args, "--backup-dir", req.BackupDirArg)
 	}
 
 	// 8. Dry run.
-	if dryRun {
+	if req.DryRun {
 		args = append(args, "--dry-run")
 	}
 
 	// 9. Source and destination are always last.
-	args = append(args, source, destination)
+	args = append(args, req.Source, req.Destination)
 
 	return args
 }
@@ -128,14 +150,17 @@ func BuildRcloneArgs(subcommand string, defaults *config.RcloneDefaults, job con
 // stats capture and progress display; user flags that duplicate them may produce
 // unexpected output or break stats parsing.
 //
-// engineName must be "rsync" or "rclone". userFlags are the extra_flags values
+// engineName is config.EngineRsync or config.EngineRclone; anything else warns about nothing. userFlags are the extra_flags values
 // from the job config.
 func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string) {
 	var keys []string
-	if engineName == "rsync" {
+	switch engineName {
+	case config.EngineRsync:
 		keys = rsyncInstrumentationKeys
-	} else {
+	case config.EngineRclone:
 		keys = rcloneInstrumentationKeys
+	default:
+		return // unknown engine: no instrumentation keys to conflict with
 	}
 
 	for _, flag := range userFlags {
@@ -150,77 +175,41 @@ func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string
 	}
 }
 
-// buildTuningFlags translates RcloneDefaults tuning fields into rclone flag
-// strings. Zero-value fields (0, "", false) produce no output.
-func buildTuningFlags(d *config.RcloneDefaults) []string {
+// buildTuningFlags translates RcloneTuning fields into rclone flag strings.
+// Zero-value fields (0, "", false) produce no output, so an unset override
+// never shadows a default. Called twice by BuildRcloneArgs — defaults first,
+// then the job's overrides — so rclone's last-flag-wins applies.
+func buildTuningFlags(t config.RcloneTuning) []string {
 	var flags []string
-	if d.Transfers > 0 {
-		flags = append(flags, "--transfers", fmt.Sprintf("%d", d.Transfers))
+	if t.Transfers > 0 {
+		flags = append(flags, "--transfers", strconv.Itoa(t.Transfers))
 	}
-	if d.Checkers > 0 {
-		flags = append(flags, "--checkers", fmt.Sprintf("%d", d.Checkers))
+	if t.Checkers > 0 {
+		flags = append(flags, "--checkers", strconv.Itoa(t.Checkers))
 	}
-	if d.Bwlimit != "" {
-		flags = append(flags, "--bwlimit", d.Bwlimit)
+	if t.Bwlimit != "" {
+		flags = append(flags, "--bwlimit", t.Bwlimit)
 	}
-	if d.DriveChunkSize != "" {
-		flags = append(flags, "--drive-chunk-size", d.DriveChunkSize)
+	if t.DriveChunkSize != "" {
+		flags = append(flags, "--drive-chunk-size", t.DriveChunkSize)
 	}
-	if d.BufferSize != "" {
-		flags = append(flags, "--buffer-size", d.BufferSize)
+	if t.BufferSize != "" {
+		flags = append(flags, "--buffer-size", t.BufferSize)
 	}
-	if d.UseMmap {
+	if t.UseMmap {
 		flags = append(flags, "--use-mmap")
 	}
-	if d.Timeout != "" {
-		flags = append(flags, "--timeout", d.Timeout)
+	if t.Timeout != "" {
+		flags = append(flags, "--timeout", t.Timeout)
 	}
-	if d.Contimeout != "" {
-		flags = append(flags, "--contimeout", d.Contimeout)
+	if t.Contimeout != "" {
+		flags = append(flags, "--contimeout", t.Contimeout)
 	}
-	if d.LowLevelRetries > 0 {
-		flags = append(flags, "--low-level-retries", fmt.Sprintf("%d", d.LowLevelRetries))
+	if t.LowLevelRetries > 0 {
+		flags = append(flags, "--low-level-retries", strconv.Itoa(t.LowLevelRetries))
 	}
-	if d.OrderBy != "" {
-		flags = append(flags, "--order-by", d.OrderBy)
-	}
-	return flags
-}
-
-// buildJobTuningFlags translates per-job tuning override fields into rclone
-// flags. Only non-zero fields produce output, so unset overrides do not shadow
-// the defaults.
-func buildJobTuningFlags(job config.Job) []string {
-	var flags []string
-	if job.Transfers > 0 {
-		flags = append(flags, "--transfers", fmt.Sprintf("%d", job.Transfers))
-	}
-	if job.Checkers > 0 {
-		flags = append(flags, "--checkers", fmt.Sprintf("%d", job.Checkers))
-	}
-	if job.Bwlimit != "" {
-		flags = append(flags, "--bwlimit", job.Bwlimit)
-	}
-	if job.DriveChunkSize != "" {
-		flags = append(flags, "--drive-chunk-size", job.DriveChunkSize)
-	}
-	if job.BufferSize != "" {
-		flags = append(flags, "--buffer-size", job.BufferSize)
-	}
-	if job.UseMmap {
-		flags = append(flags, "--use-mmap")
-	}
-	if job.Timeout != "" {
-		flags = append(flags, "--timeout", job.Timeout)
-	}
-	if job.Contimeout != "" {
-		flags = append(flags, "--contimeout", job.Contimeout)
-	}
-	if job.LowLevelRetries > 0 {
-		flags = append(flags, "--low-level-retries", fmt.Sprintf("%d", job.LowLevelRetries))
-	}
-	if job.OrderBy != "" {
-		flags = append(flags, "--order-by", job.OrderBy)
+	if t.OrderBy != "" {
+		flags = append(flags, "--order-by", t.OrderBy)
 	}
 	return flags
 }

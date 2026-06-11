@@ -186,7 +186,7 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 	if r.cfg.Defaults != nil {
 		rcloneDefaults = r.cfg.Defaults.Rclone
 	}
-	WarnFlagConflicts(r.logger, "rclone", collectRcloneUserFlags(rcloneDefaults, job))
+	WarnFlagConflicts(r.logger, config.EngineRclone, collectRcloneUserFlags(rcloneDefaults, job))
 
 	remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
 	if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
@@ -275,7 +275,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		defaults = r.cfg.Defaults.Rsync
 	}
 
-	WarnFlagConflicts(r.logger, "rsync", collectRsyncUserFlags(defaults, job))
+	WarnFlagConflicts(r.logger, config.EngineRsync, collectRsyncUserFlags(defaults, job))
 
 	multiSource := len(job.Sources) > 1
 
@@ -308,7 +308,15 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		r.logInfo(fmt.Sprintf("Source: %s", resolved))
 		r.logInfo(fmt.Sprintf("Destination: %s", job.Destination))
 
-		args := BuildRsyncArgs(defaults, job, resolved, job.Destination, job.Delete && isDir, r.dryRun, r.logFile)
+		args := BuildRsyncArgs(RsyncArgsRequest{
+			Defaults:    defaults,
+			Job:         job,
+			Source:      resolved,
+			Destination: job.Destination,
+			IsDeleteDir: job.Delete && isDir,
+			DryRun:      r.dryRun,
+			LogFile:     r.logFile,
+		})
 		r.logger.Debug(formatExec("rsync", args))
 
 		// MaxRuntimeDuration returns (0, nil) for empty or (duration, nil) for
@@ -383,8 +391,24 @@ func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, t
 	r.logInfo(fmt.Sprintf("Source: %s", source))
 	r.logInfo(fmt.Sprintf("Destination: %s", destination))
 
-	subcommand, backupDirArg := selectMode(job.Mode, destination, remoteName, job.BackupPath, timestamp, isDir, r.logger)
-	args := BuildRcloneArgs(subcommand, rcloneDefaults, job, source, destination, r.dryRun, r.logFile, backupDirArg)
+	subcommand, backupDirArg := selectMode(modeRequest{
+		Mode:         job.Mode,
+		Destination:  destination,
+		RemoteName:   remoteName,
+		BackupPath:   job.BackupPath,
+		RunTimestamp: timestamp,
+		IsDir:        isDir,
+	}, r.logger)
+	args := BuildRcloneArgs(RcloneArgsRequest{
+		Subcommand:   subcommand,
+		Defaults:     rcloneDefaults,
+		Job:          job,
+		Source:       source,
+		Destination:  destination,
+		DryRun:       r.dryRun,
+		LogFile:      r.logFile,
+		BackupDirArg: backupDirArg,
+	})
 	r.logger.Debug(formatExec("rclone", args))
 
 	// See the rsync branch for why the error is discarded; same reasoning applies.

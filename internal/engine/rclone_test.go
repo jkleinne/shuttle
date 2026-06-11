@@ -86,10 +86,14 @@ func TestSelectMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			subcommand, backupDirArg := selectMode(
-				tt.mode, tt.destination, tt.remoteName,
-				tt.backupPath, tt.runTimestamp, tt.isDir, logger,
-			)
+			subcommand, backupDirArg := selectMode(modeRequest{
+				Mode:         tt.mode,
+				Destination:  tt.destination,
+				RemoteName:   tt.remoteName,
+				BackupPath:   tt.backupPath,
+				RunTimestamp: tt.runTimestamp,
+				IsDir:        tt.isDir,
+			}, logger)
 			if subcommand != tt.wantSubcommand {
 				t.Errorf("subcommand = %q, want %q", subcommand, tt.wantSubcommand)
 			}
@@ -280,7 +284,7 @@ func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
 	}
 	executor, logPath := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -310,7 +314,7 @@ func TestRcloneExec_CopyDir_Succeeds(t *testing.T) {
 	dst := t.TempDir()
 	executor, logPath := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -338,7 +342,7 @@ func TestRcloneExec_SyncDir_DeletesExtra(t *testing.T) {
 	}
 	executor, logPath := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs("sync", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -362,7 +366,7 @@ func TestRcloneExec_SyncDir_BackupDir_PreservesDeleted(t *testing.T) {
 	executor, logPath := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
 	backupDirArg := ":local:" + backupDir
-	args := BuildRcloneArgs("sync", nil, job, src+"/", ":local:"+dst, false, logPath, backupDirArg)
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath, BackupDirArg: backupDirArg})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -380,7 +384,7 @@ func TestRcloneExec_MissingSource_Fails(t *testing.T) {
 	dst := t.TempDir()
 	executor, logPath := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs("copy", nil, job, "/nonexistent/path/does/not/exist", ":local:"+dst, false, logPath, "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: "/nonexistent/path/does/not/exist", Destination: ":local:" + dst, LogFile: logPath})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusFailed {
 		t.Errorf("Status = %q, want failed", result.Status)
@@ -627,7 +631,7 @@ func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 	// --config /dev/null prevents rclone from loading the developer's
 	// real rclone config during the test.
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs("copy", nil, job, src+"/", ":local:"+dst, false, logPath, "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
 	result := executor.Exec(ctx, args, nil)
 
 	if result.Status != StatusTimedOut {

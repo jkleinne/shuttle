@@ -17,7 +17,7 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 		Delete:     true,
 		ExtraFlags: []string{"--exclude=.*"},
 	}
-	args := BuildRsyncArgs(defaults, job, "/src/", "/dst/", true, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Defaults: defaults, Job: job, Source: "/src/", Destination: "/dst/", IsDeleteDir: true})
 	joined := strings.Join(args, " ")
 
 	// Instrumentation must be present.
@@ -46,7 +46,7 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_NoDefaults(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst"})
 	// Instrumentation flags must appear even when no defaults are provided.
 	found := false
 	for _, a := range args {
@@ -60,7 +60,7 @@ func TestBuildRsyncArgs_NoDefaults(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_DryRun(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, true, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst", DryRun: true})
 	found := false
 	for _, a := range args {
 		if a == "--dry-run" {
@@ -75,7 +75,7 @@ func TestBuildRsyncArgs_DryRun(t *testing.T) {
 func TestBuildRsyncArgs_DeleteNotAppliedToFile(t *testing.T) {
 	// isDeleteDir=false: --delete-after must not appear even when job.Delete is true.
 	job := config.Job{Delete: true}
-	args := BuildRsyncArgs(nil, job, "/src/file.txt", "/dst/", false, false, "")
+	args := BuildRsyncArgs(RsyncArgsRequest{Job: job, Source: "/src/file.txt", Destination: "/dst/"})
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--delete-after") {
 		t.Error("--delete-after must not appear when isDeleteDir is false")
@@ -83,7 +83,7 @@ func TestBuildRsyncArgs_DeleteNotAppliedToFile(t *testing.T) {
 }
 
 func TestBuildRsyncArgs_LogFile(t *testing.T) {
-	args := BuildRsyncArgs(nil, config.Job{}, "/src", "/dst", false, false, "/tmp/shuttle.log")
+	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst", LogFile: "/tmp/shuttle.log"})
 	found := false
 	for _, a := range args {
 		if strings.HasPrefix(a, "--log-file=") {
@@ -97,16 +97,15 @@ func TestBuildRsyncArgs_LogFile(t *testing.T) {
 
 func TestBuildRcloneArgs_DefaultsAndOverrides(t *testing.T) {
 	defaults := &config.RcloneDefaults{
-		Flags:      []string{"--copy-links", "--fast-list"},
-		FilterFile: "/tmp/filters.txt",
-		Transfers:  6,
-		Bwlimit:    "5.5M",
+		Flags:        []string{"--copy-links", "--fast-list"},
+		FilterFile:   "/tmp/filters.txt",
+		RcloneTuning: config.RcloneTuning{Transfers: 6, Bwlimit: "5.5M"},
 	}
 	job := config.Job{
-		Bwlimit:    "2M", // per-job override
-		ExtraFlags: []string{"--track-renames"},
+		RcloneTuning: config.RcloneTuning{Bwlimit: "2M"}, // per-job override
+		ExtraFlags:   []string{"--track-renames"},
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src/", "remote:dst/", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src/", Destination: "remote:dst/", LogFile: "/tmp/log"})
 	joined := strings.Join(args, " ")
 
 	// Subcommand is first.
@@ -148,7 +147,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 	job := config.Job{
 		FilterFile: "/job/filters.txt",
 	}
-	args := BuildRcloneArgs("copy", defaults, job, "/src", "remote:dst", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
 	// The job-level filter file should be used; the default must not appear.
 	found := false
 	for i, a := range args {
@@ -167,7 +166,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", false, "/tmp/log", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--stats 1s") {
 		t.Error("missing instrumentation --stats 1s")
@@ -184,7 +183,7 @@ func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_BackupDir(t *testing.T) {
-	args := BuildRcloneArgs("sync", nil, config.Job{}, "/src", "remote:dst", false, "", "remote:_archive/2026-01-01/dst/")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Source: "/src", Destination: "remote:dst", BackupDirArg: "remote:_archive/2026-01-01/dst/"})
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--backup-dir remote:_archive/2026-01-01/dst/") {
 		t.Errorf("missing --backup-dir in args: %q", joined)
@@ -192,7 +191,7 @@ func TestBuildRcloneArgs_BackupDir(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_DryRun(t *testing.T) {
-	args := BuildRcloneArgs("copy", nil, config.Job{}, "/src", "remote:dst", true, "", "")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst", DryRun: true})
 	found := false
 	for _, a := range args {
 		if a == "--dry-run" {
@@ -205,19 +204,14 @@ func TestBuildRcloneArgs_DryRun(t *testing.T) {
 }
 
 func TestBuildTuningFlags_ZeroValuesOmitted(t *testing.T) {
-	defaults := &config.RcloneDefaults{
-		Transfers: 0,
-		Bwlimit:   "",
-		UseMmap:   false,
-	}
-	flags := buildTuningFlags(defaults)
+	flags := buildTuningFlags(config.RcloneTuning{})
 	if len(flags) != 0 {
 		t.Errorf("expected no flags for zero values, got %v", flags)
 	}
 }
 
 func TestBuildTuningFlags_AllFields(t *testing.T) {
-	defaults := &config.RcloneDefaults{
+	tuning := config.RcloneTuning{
 		Transfers:       4,
 		Checkers:        8,
 		Bwlimit:         "10M",
@@ -229,7 +223,7 @@ func TestBuildTuningFlags_AllFields(t *testing.T) {
 		LowLevelRetries: 10,
 		OrderBy:         "size,desc",
 	}
-	flags := buildTuningFlags(defaults)
+	flags := buildTuningFlags(tuning)
 	joined := strings.Join(flags, " ")
 	expects := []string{
 		"--transfers 4", "--checkers 8", "--bwlimit 10M",
@@ -253,7 +247,7 @@ func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"-a", "--stats", "-v"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "--stats", "-v"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --stats, got %q", buf.String())
 	}
@@ -268,7 +262,7 @@ func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"--info=progress2"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"--info=progress2"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --info=progress2, got %q", buf.String())
 	}
@@ -283,7 +277,7 @@ func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rclone", []string{"--log-file=/custom/path.log"})
+	WarnFlagConflicts(logger, config.EngineRclone, []string{"--log-file=/custom/path.log"})
 	if !strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("expected conflict warning for --log-file=..., got %q", buf.String())
 	}
@@ -298,35 +292,25 @@ func TestWarnFlagConflicts_NoConflict(t *testing.T) {
 	}
 	defer logger.Close()
 
-	WarnFlagConflicts(logger, "rsync", []string{"-a", "-v", "-h"})
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "-v", "-h"})
 	if strings.Contains(buf.String(), "conflicts") {
 		t.Errorf("unexpected conflict warning for safe flags: %q", buf.String())
 	}
 }
 
-func TestBuildJobTuningFlags_OnlyOverrides(t *testing.T) {
-	job := config.Job{
-		Bwlimit:   "2M",
-		Transfers: 3,
+func TestWarnFlagConflicts_UnknownEngine_NoWarning(t *testing.T) {
+	var buf strings.Builder
+	logPath := filepath.Join(t.TempDir(), "test.log")
+	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
+	if err != nil {
+		t.Fatalf("creating logger: %v", err)
 	}
-	flags := buildJobTuningFlags(job)
-	joined := strings.Join(flags, " ")
-	if !strings.Contains(joined, "--bwlimit 2M") {
-		t.Error("missing --bwlimit from job override")
-	}
-	if !strings.Contains(joined, "--transfers 3") {
-		t.Error("missing --transfers from job override")
-	}
-	// Fields not set on job must not appear.
-	if strings.Contains(joined, "--checkers") {
-		t.Error("--checkers should not appear when not overridden")
-	}
-}
+	defer logger.Close()
 
-func TestBuildJobTuningFlags_ZeroValuesOmitted(t *testing.T) {
-	job := config.Job{} // all zero values
-	flags := buildJobTuningFlags(job)
-	if len(flags) != 0 {
-		t.Errorf("expected no flags for zero-value job, got %v", flags)
+	// An unrecognized engine must match no instrumentation keys at all,
+	// not silently fall through to rclone's.
+	WarnFlagConflicts(logger, "tarsnap", []string{"--stats", "--log-file=/x"})
+	if strings.Contains(buf.String(), "conflicts") {
+		t.Errorf("unknown engine should produce no conflict warnings, got %q", buf.String())
 	}
 }

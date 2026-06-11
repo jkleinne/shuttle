@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
@@ -205,33 +206,46 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 	return ItemResult{Name: displayName, Status: status, Stats: stats}
 }
 
+// modeRequest carries the inputs selectMode needs to pick the rclone
+// subcommand and construct the --backup-dir value.
+type modeRequest struct {
+	Mode         string
+	Destination  string
+	RemoteName   string
+	BackupPath   string
+	RunTimestamp string
+	IsDir        bool
+}
+
 // selectMode returns the rclone subcommand and any --backup-dir argument value.
 // Copy mode is used when mode is "copy" or the source is a file (rclone sync
 // requires a directory target). When sync mode is active and a backup path is
 // configured, the backup-dir is constructed as:
 //
 //	remote:<backup_path>/<run_timestamp>/<dest_subpath>/
-func selectMode(mode, destination, remoteName, backupPath, runTimestamp string, isDir bool, logger *log.Logger) (subcommand, backupDirArg string) {
-	if mode == "copy" || !isDir {
-		if mode == "sync" && !isDir {
+func selectMode(req modeRequest, logger *log.Logger) (subcommand, backupDirArg string) {
+	if req.Mode == config.ModeCopy || !req.IsDir {
+		if req.Mode == config.ModeSync && !req.IsDir {
 			logger.Info("mode is 'sync' but source is a file; using 'rclone copy'")
 		}
-		return "copy", ""
+		// config.ModeCopy/ModeSync double as the rclone subcommand spellings,
+		// so the mode constant is returned directly as the subcommand.
+		return config.ModeCopy, ""
 	}
 
-	if backupPath != "" {
-		destSubpath := strings.TrimPrefix(destination, remoteName+":")
+	if req.BackupPath != "" {
+		destSubpath := strings.TrimPrefix(req.Destination, req.RemoteName+":")
 		destSubpath = strings.TrimRight(destSubpath, "/")
 		backupDir := fmt.Sprintf("%s:%s/%s/%s/",
-			remoteName,
-			strings.TrimRight(backupPath, "/"),
-			runTimestamp,
+			req.RemoteName,
+			strings.TrimRight(req.BackupPath, "/"),
+			req.RunTimestamp,
 			destSubpath,
 		)
-		return "sync", backupDir
+		return config.ModeSync, backupDir
 	}
 
-	return "sync", ""
+	return config.ModeSync, ""
 }
 
 // archiveDateLayout is the date prefix on archive directory names; the run

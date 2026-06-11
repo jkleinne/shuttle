@@ -116,11 +116,6 @@ func (l *Logger) LogPath() string {
 	return l.file.Name()
 }
 
-// Verbosity returns the terminal verbosity level set at construction.
-func (l *Logger) Verbosity() Verbosity {
-	return l.verbosity
-}
-
 // Header logs a section separator with the given label.
 // Terminal: bold blue "==> label" (hidden in quiet mode). File: "==> label".
 func (l *Logger) Header(msg string) {

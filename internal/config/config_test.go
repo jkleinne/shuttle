@@ -391,8 +391,8 @@ func TestRcloneFilterFiles(t *testing.T) {
 		Defaults: &config.Defaults{Rclone: &config.RcloneDefaults{FilterFile: "/def.txt"}},
 		Jobs: []config.Job{
 			{Name: "a", Engine: config.EngineRclone, FilterFile: "/a.txt"},
-			{Name: "b", Engine: config.EngineRclone},               // inherits default
-			{Name: "c", Engine: config.EngineRclone, FilterFile: "/a.txt"}, // dup of a
+			{Name: "b", Engine: config.EngineRclone},                                            // inherits default
+			{Name: "c", Engine: config.EngineRclone, FilterFile: "/a.txt"},                      // dup of a
 			{Name: "r", Engine: config.EngineRsync, Sources: []string{"/x"}, Destination: "/y"}, // ignored
 		},
 	}
