@@ -134,10 +134,13 @@ func TestResolveColor(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveColor(tc.mode, tc.stdoutIsTTY, tc.noColor)
+			got := resolveColor(colorInputs{
+				mode:             tc.mode,
+				stdoutIsTerminal: tc.stdoutIsTTY,
+				noColor:          tc.noColor,
+			})
 			if got != tc.want {
-				t.Errorf("resolveColor(%q, %v, %v) = %v, want %v",
-					tc.mode, tc.stdoutIsTTY, tc.noColor, got, tc.want)
+				t.Errorf("resolveColor() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -234,6 +237,96 @@ func TestCLI_MalformedConfig_RunConfigError(t *testing.T) {
 	}
 }
 
+func TestCLI_MissingDefaultConfig_FailsBeforeLogging(t *testing.T) {
+	configHome := t.TempDir()
+	stateHome := filepath.Join(t.TempDir(), "state")
+	env := []string{
+		"XDG_CONFIG_HOME=" + configHome,
+		"XDG_STATE_HOME=" + stateHome,
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
+	}
+}
+
+func TestCLI_AllJobsFiltered_FailsBeforeLogging(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "first"
+engine = "rsync"
+sources = [%q]
+destination = %q
+
+[[job]]
+name = "second"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, source, destination, source, destination))
+	stateHome := strings.TrimPrefix(env[1], "XDG_STATE_HOME=")
+
+	result := runShuttle(t, env, "--skip", "first", "--skip", "second")
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
+	}
+}
+
+func TestCLI_SelectedRemoteMatchesNoSelectedJob_FailsBeforeCredentialHandling(t *testing.T) {
+	source := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "north-cloud"
+engine = "rclone"
+source = %q
+remotes = ["north"]
+mode = "copy"
+
+[[job]]
+name = "south-cloud"
+engine = "rclone"
+source = %q
+remotes = ["south"]
+mode = "copy"
+`, source, source))
+	stateHome := strings.TrimPrefix(env[1], "XDG_STATE_HOME=")
+
+	result := runShuttle(t, env, "--only", "north-cloud", "--remote", "south")
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if strings.Contains(result.stderr, "RCLONE_CONFIG_PASS") ||
+		strings.Contains(result.stderr, "RCLONE_PASSWORD_COMMAND") {
+		t.Errorf("stderr = %q, want no credential warning", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
+	}
+}
+
 func TestCLI_UnknownJobName_UsageError(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
@@ -277,6 +370,31 @@ destination = %q
 	result := runShuttle(t, env)
 	if result.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_RsyncOnly_DoesNotHandleRcloneCredentials(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	missingSource := filepath.Join(t.TempDir(), "missing")
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "optional-device"
+engine = "rsync"
+sources = [%q]
+destination = %q
+optional = true
+`, missingSource, t.TempDir()))
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if strings.Contains(result.stderr, "RCLONE_CONFIG_PASS") ||
+		strings.Contains(result.stderr, "RCLONE_PASSWORD_COMMAND") {
+		t.Errorf("stderr = %q, want no rclone credential handling", result.stderr)
 	}
 }
 
@@ -917,19 +1035,129 @@ optional = true
 	}
 }
 
-func TestResolveRclonePassword_EnvPreset_ReturnsEmpty(t *testing.T) {
-	t.Setenv("RCLONE_CONFIG_PASS", "already-set")
-	logger, err := log.NewWithWriter(&bytes.Buffer{}, filepath.Join(t.TempDir(), "t.log"), false, log.VerbosityNormal)
+func newPasswordTestLogger(t *testing.T, output io.Writer) *log.Logger {
+	t.Helper()
+	logger, err := log.NewWithWriter(output, filepath.Join(t.TempDir(), "t.log"), false, log.VerbosityNormal)
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
-	defer logger.Close()
+	t.Cleanup(logger.Close)
+	return logger
+}
 
-	if got := resolveRclonePassword(logger); got != "" {
-		t.Errorf("resolveRclonePassword() = %q, want \"\" when env is preset", got)
+func TestResolveRclonePassword_NativeEnvironmentSuppressesPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		variable string
+	}{
+		{name: "config password", variable: envRcloneConfigPass},
+		{name: "password command", variable: envRclonePasswordCommand},
 	}
-	if v := os.Getenv("RCLONE_CONFIG_PASS"); v != "already-set" {
-		t.Errorf("RCLONE_CONFIG_PASS = %q, want unchanged 'already-set'", v)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(envRcloneConfigPass, "")
+			t.Setenv(envRclonePasswordCommand, "")
+			t.Setenv(test.variable, "already-set")
+			readCalled := false
+			prompt := passwordPrompt{
+				writer:   io.Discard,
+				terminal: true,
+				readPassword: func() ([]byte, error) {
+					readCalled = true
+					return []byte("prompted-secret"), nil
+				},
+			}
+
+			got, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+			if err != nil {
+				t.Fatalf("resolveRclonePassword() error = %v", err)
+			}
+			if got != "" {
+				t.Errorf("resolveRclonePassword() = %q, want empty native inheritance", got)
+			}
+			if readCalled {
+				t.Error("password reader called despite native credential environment")
+			}
+			if value := os.Getenv(test.variable); value != "already-set" {
+				t.Errorf("%s = %q, want unchanged", test.variable, value)
+			}
+		})
+	}
+}
+
+func TestResolveRclonePassword_NonterminalWarningNamesNativeOptions(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	var output bytes.Buffer
+	prompt := passwordPrompt{
+		writer:   io.Discard,
+		terminal: false,
+		readPassword: func() ([]byte, error) {
+			t.Fatal("password reader called for nonterminal input")
+			return nil, nil
+		},
+	}
+
+	got, err := resolveRclonePassword(newPasswordTestLogger(t, &output), prompt)
+
+	if err != nil {
+		t.Fatalf("resolveRclonePassword() error = %v", err)
+	}
+	if got != "" {
+		t.Errorf("resolveRclonePassword() = %q, want empty", got)
+	}
+	for _, variable := range []string{envRcloneConfigPass, envRclonePasswordCommand} {
+		if !strings.Contains(output.String(), variable) {
+			t.Errorf("warning = %q, want it to name %s", output.String(), variable)
+		}
+	}
+}
+
+func TestResolveRclonePassword_ReadErrorWrapsContext(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	readErr := errors.New("terminal unavailable")
+	prompt := passwordPrompt{
+		writer:   io.Discard,
+		terminal: true,
+		readPassword: func() ([]byte, error) {
+			return nil, readErr
+		},
+	}
+
+	_, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+	if !errors.Is(err, readErr) {
+		t.Fatalf("resolveRclonePassword() error = %v, want wrapped read error", err)
+	}
+	if !strings.Contains(err.Error(), "reading rclone config password") {
+		t.Errorf("error = %q, want password read context", err)
+	}
+}
+
+func TestResolveRclonePassword_PromptedValueIsReturned(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	var output bytes.Buffer
+	prompt := passwordPrompt{
+		writer:   &output,
+		terminal: true,
+		readPassword: func() ([]byte, error) {
+			return []byte("prompted-secret"), nil
+		},
+	}
+
+	got, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+	if err != nil {
+		t.Fatalf("resolveRclonePassword() error = %v", err)
+	}
+	if got != "prompted-secret" {
+		t.Errorf("resolveRclonePassword() = %q, want prompted value", got)
+	}
+	if !strings.Contains(output.String(), "Enter rclone config password") {
+		t.Errorf("prompt output = %q, want password prompt", output.String())
 	}
 }
 

@@ -41,54 +41,6 @@ func TestValidateJobNames_SkipAndOnlyConflict(t *testing.T) {
 	}
 }
 
-func TestShouldRunJob_SkipLogic(t *testing.T) {
-	tests := []struct {
-		name    string
-		skip    []string
-		only    []string
-		jobName string
-		wantRun bool
-	}{
-		{"no filters", nil, nil, "photos", true},
-		{"skip photos", []string{"photos"}, nil, "photos", false},
-		{"skip photos, run projects", []string{"photos"}, nil, "projects", true},
-		{"only docs", nil, []string{"docs"}, "photos", false},
-		{"only photos", nil, []string{"photos"}, "photos", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRunJob(tt.jobName, tt.skip, tt.only)
-			if got != tt.wantRun {
-				t.Errorf("shouldRunJob(%q) = %v, want %v", tt.jobName, got, tt.wantRun)
-			}
-		})
-	}
-}
-
-func TestTargetRemotes_NoSelection(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive", "koofr"}, nil)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 remotes, got %d", len(got))
-	}
-}
-
-func TestTargetRemotes_WithSelection(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive", "koofr"}, []string{"gdrive"})
-	if len(got) != 1 || got[0] != "gdrive" {
-		t.Errorf("expected [gdrive], got %v", got)
-	}
-}
-
-func TestTargetRemotes_SelectionNotInJob(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive"}, []string{"onedrive"})
-	if len(got) != 0 {
-		t.Errorf("expected empty (no overlap), got %v", got)
-	}
-}
-
 type stubRunnerLogger struct {
 	logPath string
 }
@@ -153,10 +105,19 @@ func (*stubRcloneCommandExecutor) CleanupArchives(context.Context, ArchiveCleanu
 	return nil
 }
 
-func validRunnerConfig(t *testing.T) RunnerConfig {
+func buildTestRunPlan(t *testing.T, cfg *config.Config, options RunOptions) RunPlan {
+	t.Helper()
+	plan, err := BuildRunPlan(cfg, options)
+	if err != nil {
+		t.Fatalf("BuildRunPlan() error = %v", err)
+	}
+	return plan
+}
+
+func validRunnerConfig(t *testing.T, plan RunPlan) RunnerConfig {
 	t.Helper()
 	return RunnerConfig{
-		Cfg:           &config.Config{},
+		Plan:          plan,
 		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
 		Logger:        &stubRunnerLogger{logPath: filepath.Join(t.TempDir(), "shuttle.log")},
 		Progress:      &stubRunnerProgress{},
@@ -167,6 +128,17 @@ func validRunnerConfig(t *testing.T) RunnerConfig {
 	}
 }
 
+func baselineRunPlan(t *testing.T) RunPlan {
+	t.Helper()
+	return buildTestRunPlan(t, &config.Config{Jobs: []config.Job{{
+		Name:        "baseline",
+		Engine:      config.EngineRsync,
+		Sources:     []string{filepath.Join(t.TempDir(), "missing")},
+		Destination: t.TempDir(),
+		Optional:    true,
+	}}}, RunOptions{})
+}
+
 func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -174,9 +146,9 @@ func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
 		wantError string
 	}{
 		{
-			name:      "nil config",
-			change:    func(rc *RunnerConfig) { rc.Cfg = nil },
-			wantError: "config",
+			name:      "zero plan",
+			change:    func(rc *RunnerConfig) { rc.Plan = RunPlan{} },
+			wantError: "invalid run plan",
 		},
 		{
 			name:      "empty config path",
@@ -236,7 +208,7 @@ func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rc := validRunnerConfig(t)
+			rc := validRunnerConfig(t, baselineRunPlan(t))
 			tt.change(&rc)
 
 			runner, err := NewRunner(rc)
@@ -246,6 +218,9 @@ func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantError) {
 				t.Errorf("error = %q, want it to contain %q", err, tt.wantError)
+			}
+			if tt.name == "zero plan" && !errors.Is(err, ErrInvalidRunPlan) {
+				t.Errorf("error = %v, want it to wrap ErrInvalidRunPlan", err)
 			}
 		})
 	}
@@ -309,7 +284,7 @@ func TestNewRunner_TypedNilPorts_ReturnPlainNilErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			runnerConfig := validRunnerConfig(t)
+			runnerConfig := validRunnerConfig(t, baselineRunPlan(t))
 			test.change(&runnerConfig)
 
 			assertNewRunnerRejectsTypedNil(t, runnerConfig, test.wantError)
@@ -337,8 +312,7 @@ func assertNewRunnerRejectsTypedNil(t *testing.T, runnerConfig RunnerConfig, wan
 func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
 	source := t.TempDir()
 	destination := t.TempDir()
-	rc := validRunnerConfig(t)
-	rc.Cfg = &config.Config{
+	cfg := &config.Config{
 		Jobs: []config.Job{{
 			Name:        "documents",
 			Engine:      config.EngineRsync,
@@ -346,6 +320,7 @@ func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
 			Destination: destination,
 		}},
 	}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
 	prerequisites := rc.Prerequisites.(*stubPrerequisiteChecker)
 	locker := rc.Locker.(*stubRunLocker)
 	rsync := rc.Rsync.(*stubRsyncCommandExecutor)
@@ -354,7 +329,7 @@ func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
 
-	summary, err := runner.Run(context.Background(), RunOptions{})
+	summary, err := runner.Run(context.Background())
 
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -389,7 +364,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 	t.Cleanup(logger.Close)
 	pw := NewProgressWriter(io.Discard, false, false)
 	runner, err := NewRunner(RunnerConfig{
-		Cfg:           &config.Config{},
+		Plan:          baselineRunPlan(t),
 		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
 		Logger:        logger,
 		Progress:      pw,

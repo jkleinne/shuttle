@@ -72,6 +72,10 @@ func newTestFileRunLocker(t *testing.T) *FileRunLocker {
 // NewRunner/Run directly instead.
 func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOptions) Summary {
 	t.Helper()
+	plan, err := BuildRunPlan(cfg, opts)
+	if err != nil {
+		t.Fatalf("BuildRunPlan() error = %v", err)
+	}
 	logFile := filepath.Join(t.TempDir(), "test.log")
 	logger, err := log.NewWithWriter(io.Discard, logFile, false, log.VerbosityNormal)
 	if err != nil {
@@ -80,7 +84,7 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 	t.Cleanup(logger.Close)
 	pw := NewProgressWriter(io.Discard, false, false)
 	runner, err := NewRunner(RunnerConfig{
-		Cfg:           cfg,
+		Plan:          plan,
 		ConfigPath:    configPath,
 		Logger:        logger,
 		Progress:      pw,
@@ -88,12 +92,11 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 		Locker:        newTestFileRunLocker(t),
 		Rsync:         NewRsyncExecutor(logger),
 		Rclone:        NewRcloneExecutor(logger, logFile, ""),
-		DryRun:        opts.DryRun,
 	})
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
-	summary, err := runner.Run(context.Background(), opts)
+	summary, err := runner.Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -279,12 +282,22 @@ func TestPipeline_OnlyFilter_SkipsUnselectedJob(t *testing.T) {
 }
 
 func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
-	// Empty-jobs config: checkPrerequisites needs no external tool, so this test
-	// runs anywhere. run1 acquires the per-config flock and holds it open
+	// An optional job with a missing source is selected work but invokes no
+	// external tool. run1 acquires the per-config flock and holds it open
 	// (released only at process exit); a second Run on the same configPath must
 	// be rejected. Calls NewRunner/Run directly rather than via runPipeline,
 	// which would t.Fatalf on the expected error.
-	cfg := &config.Config{}
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:        "optional-device",
+		Engine:      config.EngineRsync,
+		Sources:     []string{filepath.Join(t.TempDir(), "missing")},
+		Destination: t.TempDir(),
+		Optional:    true,
+	}}}
+	plan, err := BuildRunPlan(cfg, RunOptions{})
+	if err != nil {
+		t.Fatalf("BuildRunPlan() error = %v", err)
+	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 
 	newRunner := func(tag string) *Runner {
@@ -295,7 +308,7 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 		}
 		t.Cleanup(logger.Close)
 		runner, err := NewRunner(RunnerConfig{
-			Cfg:           cfg,
+			Plan:          plan,
 			ConfigPath:    configPath,
 			Logger:        logger,
 			Progress:      NewProgressWriter(io.Discard, false, false),
@@ -311,12 +324,12 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 	}
 
 	run1 := newRunner("run1")
-	if _, err := run1.Run(context.Background(), RunOptions{}); err != nil {
+	if _, err := run1.Run(context.Background()); err != nil {
 		t.Fatalf("run1.Run returned error: %v", err)
 	}
 
 	run2 := newRunner("run2")
-	_, err := run2.Run(context.Background(), RunOptions{})
+	_, err = run2.Run(context.Background())
 	if err == nil {
 		t.Fatal("run2.Run returned nil, want a lock-contention error")
 	}

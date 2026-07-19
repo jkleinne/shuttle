@@ -755,7 +755,7 @@ func TestRcloneCommand_InjectsPasswordOnlyWhenSet(t *testing.T) {
 	cmd := withPass.rcloneCommand(context.Background(), "version")
 	found := false
 	for _, e := range cmd.Env {
-		if e == "RCLONE_CONFIG_PASS=s3cr3t" {
+		if e == rcloneConfigPasswordEnvironment+"=s3cr3t" {
 			found = true
 		}
 	}
@@ -768,8 +768,12 @@ func TestRcloneCommand_InjectsPasswordOnlyWhenSet(t *testing.T) {
 		}
 	}
 
+	t.Setenv("RCLONE_PASSWORD_COMMAND", "native-provider")
 	noPass := NewRcloneExecutor(logger, "", "")
 	if cmd2 := noPass.rcloneCommand(context.Background(), "version"); cmd2.Env != nil {
-		t.Errorf("cmd.Env = %v, want nil (inherit) when configPass empty", cmd2.Env)
+		t.Errorf(
+			"cmd.Env = %v, want nil so native credential variables are inherited",
+			cmd2.Env,
+		)
 	}
 }

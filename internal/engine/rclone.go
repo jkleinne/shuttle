@@ -17,16 +17,20 @@ import (
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
-const rcloneCommandName = "rclone"
+const (
+	rcloneCommandName               = "rclone"
+	rcloneConfigPasswordEnvironment = "RCLONE_CONFIG_PASS"
+)
 
 // RcloneExecutor wraps rclone execution via os/exec. It receives pre-assembled
 // argument lists from the runner (built by BuildRcloneArgs) and handles command
 // execution and stats parsing from the shared log file.
 type RcloneExecutor struct {
-	logger     *log.Logger
-	logFile    string
-	configPass string // rclone config password; injected per-command, empty means none
-	now        func() time.Time
+	logger  *log.Logger
+	logFile string
+	// configPassword is injected per command, with an empty value preserving native inheritance.
+	configPassword string
+	now            func() time.Time
 }
 
 // ArchiveCleanupRequest carries the values for one remote archive cleanup operation.
@@ -48,14 +52,14 @@ type InformationLogger interface {
 }
 
 // NewRcloneExecutor returns a configured RcloneExecutor. logFile is the shared
-// log file used for stats parsing; configPass, when non-empty, is injected as
+// log file used for stats parsing; configPassword, when non-empty, is injected as
 // RCLONE_CONFIG_PASS into each rclone command's environment (and nowhere else).
-func NewRcloneExecutor(logger *log.Logger, logFile, configPass string) *RcloneExecutor {
+func NewRcloneExecutor(logger *log.Logger, logFile, configPassword string) *RcloneExecutor {
 	return &RcloneExecutor{
-		logger:     logger,
-		logFile:    logFile,
-		configPass: configPass,
-		now:        time.Now,
+		logger:         logger,
+		logFile:        logFile,
+		configPassword: configPassword,
+		now:            time.Now,
 	}
 }
 
@@ -139,14 +143,17 @@ func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err erro
 }
 
 // rcloneCommand builds an rclone *exec.Cmd, injecting the config password into
-// this command's environment only when one was supplied. When configPass is
+// this command's environment only when one was supplied. When configPassword is
 // empty the command inherits the ambient environment unchanged (covering both
 // the no-password case and a user-exported RCLONE_CONFIG_PASS). Callers choose
 // their own execution method on the returned command.
 func (e *RcloneExecutor) rcloneCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, rcloneCommandName, args...)
-	if e.configPass != "" {
-		cmd.Env = append(os.Environ(), "RCLONE_CONFIG_PASS="+e.configPass)
+	if e.configPassword != "" {
+		cmd.Env = append(
+			os.Environ(),
+			rcloneConfigPasswordEnvironment+"="+e.configPassword,
+		)
 	}
 	return cmd
 }

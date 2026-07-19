@@ -6,21 +6,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 )
-
-// RunOptions holds the CLI flags that control a sync run.
-type RunOptions struct {
-	DryRun          bool
-	SkipJobs        []string
-	OnlyJobs        []string
-	SelectedRemotes []string
-}
 
 // RsyncCommandExecutor keeps rsync process I/O outside runner orchestration.
 type RsyncCommandExecutor interface {
@@ -89,7 +80,7 @@ type RcloneCommandExecutor interface {
 
 // Runner orchestrates validated jobs through injected boundary ports.
 type Runner struct {
-	cfg           *config.Config
+	plan          RunPlan
 	configPath    string
 	logger        RunnerLogger
 	progress      RunnerProgress
@@ -97,13 +88,12 @@ type Runner struct {
 	locker        RunLocker
 	rsync         RsyncCommandExecutor
 	rclone        RcloneCommandExecutor
-	dryRun        bool
 }
 
-// RunnerConfig names the validated values and six boundary ports consumed by a run.
+// RunnerConfig names the immutable plan, stable path, and six boundary ports consumed by a run.
 type RunnerConfig struct {
-	// Cfg supplies validated job definitions while run planning remains unchanged.
-	Cfg *config.Config
+	// Plan supplies one valid execution authority shared by every runner stage.
+	Plan RunPlan
 	// ConfigPath provides a stable absolute identity for per-config locking.
 	ConfigPath string
 	// Logger routes run diagnostics and supplies the authoritative absolute log path.
@@ -118,14 +108,12 @@ type RunnerConfig struct {
 	Rsync RsyncCommandExecutor
 	// Rclone executes pre-built rclone arguments and archive cleanup requests.
 	Rclone RcloneCommandExecutor
-	// DryRun preserves the current execution mode until run planning owns it.
-	DryRun bool
 }
 
 // NewRunner rejects invalid boundary values before any run I/O can begin.
 func NewRunner(rc RunnerConfig) (*Runner, error) {
-	if rc.Cfg == nil {
-		return nil, errors.New("invalid runner config: config is nil")
+	if !rc.Plan.valid {
+		return nil, fmt.Errorf("invalid runner config: %w", ErrInvalidRunPlan)
 	}
 	if rc.ConfigPath == "" {
 		return nil, errors.New("invalid runner config: config path is empty")
@@ -159,7 +147,7 @@ func NewRunner(rc RunnerConfig) (*Runner, error) {
 		return nil, errors.New("invalid runner config: rclone executor is nil")
 	}
 	return &Runner{
-		cfg:           rc.Cfg,
+		plan:          rc.Plan,
 		configPath:    rc.ConfigPath,
 		logger:        rc.Logger,
 		progress:      rc.Progress,
@@ -167,7 +155,6 @@ func NewRunner(rc RunnerConfig) (*Runner, error) {
 		locker:        rc.Locker,
 		rsync:         rc.Rsync,
 		rclone:        rc.Rclone,
-		dryRun:        rc.DryRun,
 	}, nil
 }
 
@@ -248,8 +235,8 @@ func formatExec(tool string, args []string) string {
 
 // Run executes the full pipeline: prerequisites, lock, jobs, summary.
 // Partial failures are recorded in the summary but do not stop subsequent jobs.
-func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
-	if err := r.checkPrerequisites(opts); err != nil {
+func (r *Runner) Run(ctx context.Context) (Summary, error) {
+	if err := r.checkPrerequisites(); err != nil {
 		return Summary{}, fmt.Errorf("prerequisites: %w", err)
 	}
 	if err := r.locker.Acquire(r.configPath); err != nil {
@@ -260,14 +247,14 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	timestamp := start.Format("2006-01-02_150405")
 
 	var jobs []JobResult
-	for _, job := range r.cfg.Jobs {
-		jobs = append(jobs, r.dispatchJob(ctx, job, opts, timestamp)...)
+	for _, job := range r.plan.jobs {
+		jobs = append(jobs, r.dispatchJob(ctx, job, timestamp)...)
 	}
 
 	return Summary{
 		Jobs:     jobs,
 		Duration: time.Since(start),
-		DryRun:   opts.DryRun,
+		DryRun:   r.plan.dryRun,
 		Errors:   collectErrors(jobs),
 	}, nil
 }
@@ -276,19 +263,19 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 // engine-specific execution path. Rsync jobs produce exactly one JobResult;
 // rclone jobs produce one JobResult per target remote, or a single skipped
 // result when the user's --remote filter excludes every configured remote.
-func (r *Runner) dispatchJob(ctx context.Context, job config.Job, opts RunOptions, timestamp string) []JobResult {
-	if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-		r.progress.SkipJob(job.Name)
-		return []JobResult{skippedJobResult(job.Name)}
+func (r *Runner) dispatchJob(ctx context.Context, planned plannedJob, timestamp string) []JobResult {
+	if !planned.selected {
+		r.progress.SkipJob(planned.job.Name)
+		return []JobResult{skippedJobResult(planned.job.Name)}
 	}
 
-	switch job.Engine {
+	switch planned.job.Engine {
 	case config.EngineRsync:
-		r.logHeader("Syncing: " + job.Name)
-		return []JobResult{r.runRsyncJob(ctx, job)}
+		r.logHeader("Syncing: " + planned.job.Name)
+		return []JobResult{r.runRsyncJob(ctx, planned.job)}
 
 	case config.EngineRclone:
-		return r.dispatchRclone(ctx, job, opts, timestamp)
+		return r.dispatchRclone(ctx, planned.job, planned.remotes, timestamp)
 	}
 	return nil
 }
@@ -297,18 +284,17 @@ func (r *Runner) dispatchJob(ctx context.Context, job config.Job, opts RunOption
 // user's --remote filter and running archive cleanup and the sync for each
 // target. WarnFlagConflicts runs once per job (not per remote) since the
 // flag set is identical across remotes.
-func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOptions, timestamp string) []JobResult {
-	var rcloneDefaults *config.RcloneDefaults
-	if r.cfg.Defaults != nil {
-		rcloneDefaults = r.cfg.Defaults.Rclone
-	}
-	WarnFlagConflicts(r.logger, config.EngineRclone, collectRcloneUserFlags(rcloneDefaults, job))
-
-	remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
-	if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
-		r.progress.SkipJob(job.Name)
-		return []JobResult{skippedJobResult(job.Name)}
-	}
+func (r *Runner) dispatchRclone(
+	ctx context.Context,
+	job config.Job,
+	remotes []string,
+	timestamp string,
+) []JobResult {
+	WarnFlagConflicts(
+		r.logger,
+		config.EngineRclone,
+		collectRcloneUserFlags(r.plan.rcloneDefaults, job),
+	)
 
 	results := make([]JobResult, 0, len(remotes))
 	for _, remote := range remotes {
@@ -320,7 +306,7 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 			RemoteName:    remote,
 			BackupPath:    job.BackupPath,
 			RetentionDays: job.BackupRetentionDays,
-			DryRun:        r.dryRun,
+			DryRun:        r.plan.dryRun,
 		}); err != nil {
 			r.logWarn("archive cleanup for " + remote + ": " + err.Error())
 		}
@@ -395,10 +381,7 @@ func jobContext(parent context.Context, maxRuntime time.Duration) (context.Conte
 // runRsyncJob iterates each source in the job and calls rsync.
 func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 	var items []ItemResult
-	var defaults *config.RsyncDefaults
-	if r.cfg.Defaults != nil {
-		defaults = r.cfg.Defaults.Rsync
-	}
+	defaults := r.plan.rsyncDefaults
 
 	WarnFlagConflicts(r.logger, config.EngineRsync, collectRsyncUserFlags(defaults, job))
 
@@ -439,7 +422,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			Source:      resolved,
 			Destination: job.Destination,
 			IsDeleteDir: job.Delete && isDir,
-			DryRun:      r.dryRun,
+			DryRun:      r.plan.dryRun,
 			LogFile:     r.logger.LogPath(),
 		})
 		r.logger.Debug(formatExec("rsync", args))
@@ -574,10 +557,7 @@ func (r *Runner) missingRcloneSourceResult(
 
 // runRcloneJob runs rclone for one request-shaped source and remote invocation.
 func (r *Runner) runRcloneJob(ctx context.Context, request rcloneJobRequest) JobResult {
-	var defaults *config.RcloneDefaults
-	if r.cfg.Defaults != nil {
-		defaults = r.cfg.Defaults.Rclone
-	}
+	defaults := r.plan.rcloneDefaults
 
 	label := request.job.Name + " → " + request.remoteName
 	source, err := resolveRcloneSource(request.job.Source)
@@ -595,7 +575,7 @@ func (r *Runner) runRcloneJob(ctx context.Context, request rcloneJobRequest) Job
 		invocation:   invocation,
 		remoteName:   request.remoteName,
 		runTimestamp: request.runTimestamp,
-		dryRun:       r.dryRun,
+		dryRun:       r.plan.dryRun,
 		logPath:      r.logger.LogPath(),
 	})
 	r.logger.Debug(formatExec("rclone", args))
@@ -640,112 +620,12 @@ func collectRcloneUserFlags(defaults *config.RcloneDefaults, job config.Job) []s
 	return flags
 }
 
-// checkPrerequisites delegates selected tool and filter-file probes to the system boundary.
-func (r *Runner) checkPrerequisites(opts RunOptions) error {
-	request := PrerequisiteRequest{
-		FilterFiles: r.collectFilterFiles(opts),
-	}
-
-	for _, job := range r.cfg.Jobs {
-		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-			continue
-		}
-		switch job.Engine {
-		case config.EngineRsync:
-			request.NeedsRsync = true
-		case config.EngineRclone:
-			request.NeedsRclone = true
-		}
-	}
-
-	if err := r.prerequisites.Check(request); err != nil {
+// checkPrerequisites delegates the plan's cloned prerequisite request to the system boundary.
+func (r *Runner) checkPrerequisites() error {
+	if err := r.prerequisites.Check(r.plan.prerequisiteRequest()); err != nil {
 		return err
 	}
 
 	r.logger.Success("All prerequisites met.")
 	return nil
-}
-
-// collectFilterFiles returns all unique filter file paths that will be used
-// by active rclone jobs (considering both default and per-job overrides),
-// scoped to the jobs that survive the --skip/--only selection.
-func (r *Runner) collectFilterFiles(opts RunOptions) []string {
-	return r.cfg.RcloneFilterFiles(func(j config.Job) bool {
-		return shouldRunJob(j.Name, opts.SkipJobs, opts.OnlyJobs)
-	})
-}
-
-// targetRemotes returns the intersection of the job's remotes and the
-// user-selected remotes. If no selection was made, returns all job remotes.
-func (r *Runner) targetRemotes(jobRemotes, selected []string) []string {
-	if len(selected) == 0 {
-		return jobRemotes
-	}
-	selectedSet := make(map[string]bool, len(selected))
-	for _, s := range selected {
-		selectedSet[s] = true
-	}
-	var filtered []string
-	for _, remote := range jobRemotes {
-		if selectedSet[remote] {
-			filtered = append(filtered, remote)
-		}
-	}
-	return filtered
-}
-
-// ValidateJobNames checks that all names in skip and only are recognized job
-// names. Returns an error if skip and only are both non-empty, or if any name
-// is unknown.
-func ValidateJobNames(skip, only, jobNames []string) error {
-	if len(skip) > 0 && len(only) > 0 {
-		return errors.New("--skip and --only are mutually exclusive")
-	}
-
-	valid := make(map[string]bool, len(jobNames))
-	for _, name := range jobNames {
-		valid[name] = true
-	}
-
-	for _, name := range skip {
-		if !valid[name] {
-			return fmt.Errorf("unknown job %q in --skip; valid names: %v", name, sortedKeys(valid))
-		}
-	}
-	for _, name := range only {
-		if !valid[name] {
-			return fmt.Errorf("unknown job %q in --only; valid names: %v", name, sortedKeys(valid))
-		}
-	}
-	return nil
-}
-
-// shouldRunJob determines whether a named job should execute given the current
-// skip and only filters. If only is set, the job must appear in it. If skip is
-// set, the job must not appear in it.
-func shouldRunJob(name string, skip, only []string) bool {
-	if len(only) > 0 {
-		for _, o := range only {
-			if o == name {
-				return true
-			}
-		}
-		return false
-	}
-	for _, s := range skip {
-		if s == name {
-			return false
-		}
-	}
-	return true
-}
-
-// sortedKeys returns the keys of a bool map in sorted order.
-func sortedKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
 }
