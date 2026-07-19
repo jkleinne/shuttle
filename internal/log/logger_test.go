@@ -2,6 +2,7 @@ package log_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,34 +46,121 @@ func TestLogger_WritesToBothStreams(t *testing.T) {
 }
 
 func TestLogger_SanitizesMessageText(t *testing.T) {
-	var termBuf bytes.Buffer
-	logFile := filepath.Join(t.TempDir(), "test.log")
-
-	logger, err := log.NewWithWriter(&termBuf, logFile, log.Options{
-		UseColor:  false,
-		Verbosity: log.VerbosityNormal,
-	})
-	if err != nil {
-		t.Fatalf("NewWithWriter: %v", err)
-	}
-	logger.Info("trusted\nforged\x1b]0;title\a\u009b31m\x7f")
-	logger.Close()
-
+	const hostile = "trusted\nforged\x1b]0;title\a\u009b31m\x7f"
 	const sanitized = "trustedforged]0;title31m"
-	if got, want := termBuf.String(), "[INFO] "+sanitized+"\n"; got != want {
-		t.Errorf("terminal output = %q, want %q", got, want)
+	tests := []struct {
+		name         string
+		verbosity    log.Verbosity
+		fileFrame    string
+		wantTerminal bool
+		write        func(*log.Logger)
+	}{
+		{
+			name:         "header",
+			verbosity:    log.VerbosityNormal,
+			fileFrame:    "==> ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Header(hostile) },
+		},
+		{
+			name:         "info",
+			verbosity:    log.VerbosityNormal,
+			fileFrame:    "[INFO] ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Info(hostile) },
+		},
+		{
+			name:         "success",
+			verbosity:    log.VerbosityNormal,
+			fileFrame:    "[OK] ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Success(hostile) },
+		},
+		{
+			name:         "warn",
+			verbosity:    log.VerbosityNormal,
+			fileFrame:    "[WARN] ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Warn(hostile) },
+		},
+		{
+			name:         "error",
+			verbosity:    log.VerbosityNormal,
+			fileFrame:    "[ERROR] ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Error(hostile) },
+		},
+		{
+			name:         "debug",
+			verbosity:    log.VerbosityVerbose,
+			fileFrame:    "[DEBUG] ",
+			wantTerminal: true,
+			write:        func(logger *log.Logger) { logger.Debug(hostile) },
+		},
+		{
+			name:      "file header",
+			verbosity: log.VerbosityNormal,
+			fileFrame: "==> ",
+			write:     func(logger *log.Logger) { logger.FileHeader(hostile) },
+		},
+		{
+			name:      "file info",
+			verbosity: log.VerbosityNormal,
+			fileFrame: "[INFO] ",
+			write:     func(logger *log.Logger) { logger.FileInfo(hostile) },
+		},
+		{
+			name:      "file warn",
+			verbosity: log.VerbosityNormal,
+			fileFrame: "[WARN] ",
+			write:     func(logger *log.Logger) { logger.FileWarn(hostile) },
+		},
+		{
+			name:      "file error",
+			verbosity: log.VerbosityNormal,
+			fileFrame: "[ERROR] ",
+			write:     func(logger *log.Logger) { logger.FileError(hostile) },
+		},
 	}
 
-	fileBytes, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("reading log file: %v", err)
-	}
-	fileOut := string(fileBytes)
-	if !strings.HasSuffix(fileOut, "[INFO] "+sanitized+"\n") {
-		t.Errorf("file output has unsafe message text: %q", fileOut)
-	}
-	if got := strings.Count(fileOut, "\n"); got != 1 {
-		t.Errorf("file newline count = %d, want exactly 1; output: %q", got, fileOut)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var terminal bytes.Buffer
+			logFile := filepath.Join(t.TempDir(), "test.log")
+			logger, err := log.NewWithWriter(&terminal, logFile, log.Options{
+				Verbosity: test.verbosity,
+			})
+			if err != nil {
+				t.Fatalf("NewWithWriter: %v", err)
+			}
+			test.write(logger)
+			logger.Close()
+
+			terminalOutput := terminal.String()
+			if test.wantTerminal && !strings.Contains(terminalOutput, sanitized) {
+				t.Errorf("terminal output = %q, want sanitized message %q", terminalOutput, sanitized)
+			}
+			if !test.wantTerminal && terminalOutput != "" {
+				t.Errorf("terminal output = %q, want empty", terminalOutput)
+			}
+
+			fileBytes, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("reading log file: %v", err)
+			}
+			fileOutput := string(fileBytes)
+			if want := test.fileFrame + sanitized + "\n"; !strings.HasSuffix(fileOutput, want) {
+				t.Errorf("file output = %q, want suffix %q", fileOutput, want)
+			}
+			if got := strings.Count(fileOutput, "\n"); got != 1 {
+				t.Errorf("file newline count = %d, want exactly 1; output: %q", got, fileOutput)
+			}
+			for _, control := range []string{"\nforged", "\x1b", "\a", "\u009b", "\x7f"} {
+				if strings.Contains(terminalOutput, control) || strings.Contains(fileOutput, control) {
+					t.Errorf("output retains hostile control %q: terminal=%q file=%q", control, terminalOutput, fileOutput)
+				}
+			}
+		})
 	}
 }
 
@@ -84,14 +172,29 @@ func TestLogger_FileTool_SanitizesAndSerializesConcurrentRecords(t *testing.T) {
 	}
 
 	const recordsPerSource = 100
+	expected := make(map[string]bool, recordsPerSource*2)
+	for _, source := range []string{"rsync", "rclone"} {
+		for sequence := range recordsPerSource {
+			record := fmt.Sprintf(
+				"[%s] record-%s-%03dforged",
+				strings.ToUpper(source),
+				source,
+				sequence,
+			)
+			expected[record] = true
+		}
+	}
 	var writers sync.WaitGroup
 	for _, source := range []string{"rsync", "rclone"} {
 		source := source
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
-			for range recordsPerSource {
-				logger.FileTool(source, "record\nforged\x1b\u009b\x7f")
+			for sequence := range recordsPerSource {
+				logger.FileTool(
+					source,
+					fmt.Sprintf("record-%s-%03d\nforged\x1b\u009b\x7f", source, sequence),
+				)
 			}
 		}()
 	}
@@ -107,14 +210,23 @@ func TestLogger_FileTool_SanitizesAndSerializesConcurrentRecords(t *testing.T) {
 		t.Fatalf("line count = %d, want %d", got, want)
 	}
 	frame := regexp.MustCompile(
-		`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[(?:RSYNC|RCLONE)\] recordforged$`,
+		`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] (\[(?:RSYNC|RCLONE)\] record-(?:rsync|rclone)-\d{3}forged)$`,
 	)
+	seen := make(map[string]int, len(expected))
 	for lineNumber, line := range lines {
-		if !frame.MatchString(line) {
+		match := frame.FindStringSubmatch(line)
+		if match == nil {
 			t.Errorf("line %d is not one complete trusted tool frame: %q", lineNumber+1, line)
+			continue
 		}
 		if got := strings.Count(line, "[RSYNC]") + strings.Count(line, "[RCLONE]"); got != 1 {
 			t.Errorf("line %d tool frame count = %d, want exactly 1: %q", lineNumber+1, got, line)
+		}
+		seen[match[1]]++
+	}
+	for record := range expected {
+		if got := seen[record]; got != 1 {
+			t.Errorf("trusted record %q count = %d, want exactly 1", record, got)
 		}
 	}
 }
