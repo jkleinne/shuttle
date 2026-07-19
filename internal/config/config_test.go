@@ -1,11 +1,15 @@
 package config_test
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	toml "github.com/pelletier/go-toml/v2"
 
 	"github.com/jkleinne/shuttle/internal/config"
 )
@@ -148,14 +152,15 @@ backup_path = "~/backups/archive"
 
 func TestLoadBytes_UnknownField_ReturnsContextualError(t *testing.T) {
 	tests := []struct {
-		name       string
-		tomlData   string
-		unknownKey string
+		name           string
+		tomlData       string
+		fieldPath      string
+		sensitiveValue string
 	}{
 		{
 			name: "top level",
 			tomlData: `
-unexpected = true
+unexpected = "top-sensitive-value-7c9b"
 
 [[job]]
 name = "local"
@@ -163,14 +168,15 @@ engine = "rsync"
 sources = ["/tmp/source"]
 destination = "/tmp/destination"
 `,
-			unknownKey: "unexpected",
+			fieldPath:      "unexpected",
+			sensitiveValue: "top-sensitive-value-7c9b",
 		},
 		{
 			name: "rsync defaults section",
 			tomlData: `
 [defaults.rsync]
 flags = ["-a"]
-flgas = ["--delete"]
+flgas = ["rsync-sensitive-value-94af"]
 
 [[job]]
 name = "local"
@@ -178,14 +184,15 @@ engine = "rsync"
 sources = ["/tmp/source"]
 destination = "/tmp/destination"
 `,
-			unknownKey: "flgas",
+			fieldPath:      "defaults.rsync.flgas",
+			sensitiveValue: "rsync-sensitive-value-94af",
 		},
 		{
 			name: "rclone defaults section",
 			tomlData: `
 [defaults.rclone]
 flags = ["--fast-list"]
-trasnfers = 4
+trasnfers = "rclone-sensitive-value-b83d"
 
 [[job]]
 name = "cloud"
@@ -194,7 +201,8 @@ source = "/tmp/source"
 remotes = ["backup"]
 mode = "copy"
 `,
-			unknownKey: "trasnfers",
+			fieldPath:      "defaults.rclone.trasnfers",
+			sensitiveValue: "rclone-sensitive-value-b83d",
 		},
 		{
 			name: "job section",
@@ -204,9 +212,10 @@ name = "local"
 engine = "rsync"
 sources = ["/tmp/source"]
 destination = "/tmp/destination"
-destinaton = "/tmp/typo"
+destinaton = "job-sensitive-value-5e21"
 `,
-			unknownKey: "destinaton",
+			fieldPath:      "job.destinaton",
+			sensitiveValue: "job-sensitive-value-5e21",
 		},
 	}
 
@@ -216,13 +225,43 @@ destinaton = "/tmp/typo"
 			if err == nil {
 				t.Fatal("LoadBytes() = nil error, want unknown-field error")
 			}
-			if !strings.Contains(err.Error(), "parsing config") {
+
+			errText := err.Error()
+			if !strings.Contains(errText, "parsing config") {
 				t.Errorf("error = %q, want parsing context", err)
 			}
-			if !strings.Contains(err.Error(), test.unknownKey) {
-				t.Errorf("error = %q, want unknown key %q", err, test.unknownKey)
+			wantUnknownField := fmt.Sprintf("unknown field %q", test.fieldPath)
+			if !strings.Contains(errText, wantUnknownField) {
+				t.Errorf("error = %q, want fragment %q", err, wantUnknownField)
+			}
+			if strings.Contains(errText, test.sensitiveValue) {
+				t.Errorf("error contains sensitive field value %q", test.sensitiveValue)
+			}
+
+			var strictErr *toml.StrictMissingError
+			if !errors.As(err, &strictErr) {
+				t.Errorf("error type = %T, want wrapped *toml.StrictMissingError", err)
 			}
 		})
+	}
+}
+
+func TestLoadBytes_MalformedTOML_ReturnsWrappedContextualError(t *testing.T) {
+	_, err := config.LoadBytes([]byte("[[job]\n"))
+	if err == nil {
+		t.Fatal("LoadBytes() = nil error, want malformed TOML error")
+	}
+	if !strings.Contains(err.Error(), "parsing config") {
+		t.Errorf("error = %q, want parsing context", err)
+	}
+
+	var decodeErr *toml.DecodeError
+	if !errors.As(err, &decodeErr) {
+		t.Errorf("error type = %T, want wrapped *toml.DecodeError", err)
+	}
+	var strictErr *toml.StrictMissingError
+	if errors.As(err, &strictErr) {
+		t.Errorf("error type = %T, do not want *toml.StrictMissingError", err)
 	}
 }
 
