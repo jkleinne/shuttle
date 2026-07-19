@@ -362,7 +362,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 		t.Fatalf("creating logger: %v", err)
 	}
 	t.Cleanup(logger.Close)
-	pw := NewProgressWriter(io.Discard, false, false)
+	pw := NewProgressWriter(io.Discard, ProgressOptions{})
 	runner, err := NewRunner(RunnerConfig{
 		Plan:          baselineRunPlan(t),
 		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),

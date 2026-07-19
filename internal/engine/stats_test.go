@@ -303,7 +303,7 @@ func TestRenderSummary_RsyncSingleSource_NoTransfers(t *testing.T) {
 		Duration: 30 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "✓ photos") {
@@ -333,7 +333,7 @@ func TestRenderSummary_RsyncSingleSource_WithTransfers(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "14,101 checked") {
@@ -358,7 +358,7 @@ func TestRenderSummary_RsyncMultipleSources(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "gallery:") {
@@ -385,7 +385,7 @@ func TestRenderSummary_RcloneCollapsed(t *testing.T) {
 		Duration: 10 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "2 remotes") {
@@ -415,7 +415,7 @@ func TestRenderSummary_RcloneCollapsed_ShowsMaxElapsed(t *testing.T) {
 		Duration: 15 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "100 checked (12s)") {
@@ -438,7 +438,7 @@ func TestRenderSummary_RcloneExpanded_DifferentChecked(t *testing.T) {
 		Duration: 15 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "2 remotes") {
@@ -476,7 +476,7 @@ func TestRenderSummary_RcloneExpanded_WithTransfers(t *testing.T) {
 		Duration: 20 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "5 transferred, 12.3 MiB sent at 2.1 MiB/s") {
@@ -497,7 +497,7 @@ func TestRenderSummary_RcloneSingleRemote(t *testing.T) {
 		Duration: 2 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "gdrive") {
@@ -522,7 +522,7 @@ func TestRenderSummary_RcloneGroupWithNotFound(t *testing.T) {
 		Duration: 10 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "✗ docs-to-cloud") {
@@ -550,7 +550,7 @@ func TestRenderSummary_FailedAndNotFound(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "✗ backups") {
@@ -583,7 +583,7 @@ func TestRenderSummary_SkippedJob(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "– projects") {
@@ -603,7 +603,7 @@ func TestRenderSummary_SkippedJob(t *testing.T) {
 func TestRenderSummary_DryRun(t *testing.T) {
 	s := Summary{DryRun: true, Duration: 1 * time.Second}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "[DRY RUN]") {
@@ -624,7 +624,7 @@ func TestRenderSummary_FooterOmitsFailedWhenZero(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if strings.Contains(out, "failed") {
@@ -648,7 +648,7 @@ func TestRenderSummary_WithColor(t *testing.T) {
 		Duration: 1 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, true)
+	RenderSummary(&buf, s, TerminalColorEnabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "\033[") {
@@ -663,7 +663,7 @@ func TestRenderSummary_WithColor(t *testing.T) {
 }
 
 func TestStatusSymbol_OptionalMissing_PlainText(t *testing.T) {
-	got := statusSymbol(StatusOptionalMissing, false)
+	got := statusSymbol(StatusOptionalMissing, TerminalColorDisabled)
 	if got != "○" {
 		t.Errorf("statusSymbol(StatusOptionalMissing, false) = %q, want \"○\"", got)
 	}
@@ -671,7 +671,7 @@ func TestStatusSymbol_OptionalMissing_PlainText(t *testing.T) {
 
 func TestItemStatsText_OptionalMissing_PlainText(t *testing.T) {
 	item := ItemResult{Status: StatusOptionalMissing}
-	got := itemStatsText(item, false)
+	got := itemStatsText(item, TerminalColorDisabled)
 	if got != "source missing (optional)" {
 		t.Errorf("itemStatsText = %q, want \"source missing (optional)\"", got)
 	}
@@ -760,7 +760,7 @@ func TestCanCollapseGroup_AllOptionalMissing(t *testing.T) {
 }
 
 func TestFormatTally_IncludesOptionalSegment(t *testing.T) {
-	got := formatTally(5, 1, 2, 30*time.Second, false)
+	got := formatTally(5, 1, 2, 30*time.Second, TerminalColorDisabled)
 	if !strings.Contains(got, "5 passed") {
 		t.Errorf("missing '5 passed' in %q", got)
 	}
@@ -773,7 +773,7 @@ func TestFormatTally_IncludesOptionalSegment(t *testing.T) {
 }
 
 func TestFormatTally_OmitsOptionalWhenZero(t *testing.T) {
-	got := formatTally(5, 0, 0, 10*time.Second, false)
+	got := formatTally(5, 0, 0, 10*time.Second, TerminalColorDisabled)
 	if strings.Contains(got, "optional") {
 		t.Errorf("unexpected 'optional' segment in %q", got)
 	}
@@ -795,7 +795,7 @@ func TestRenderSummary_OptionalMissingRclone_TallyAndSymbol(t *testing.T) {
 		Duration: 5 * time.Second,
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	out := buf.String()
 
 	if !strings.Contains(out, "○") {

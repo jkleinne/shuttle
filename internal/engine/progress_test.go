@@ -10,7 +10,7 @@ import (
 
 func TestProgressWriter_NonInteractive_FinishJob_OK(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 	pw.FinishJob(ItemResult{
@@ -32,7 +32,7 @@ func TestProgressWriter_NonInteractive_FinishJob_OK(t *testing.T) {
 
 func TestProgressWriter_NonInteractive_FinishJob_Failed(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 	pw.FinishJob(ItemResult{Status: StatusFailed})
@@ -48,7 +48,7 @@ func TestProgressWriter_NonInteractive_FinishJob_Failed(t *testing.T) {
 
 func TestProgressWriter_NonInteractive_FinishJob_NotFound(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 	pw.FinishJob(ItemResult{Status: StatusNotFound})
@@ -61,7 +61,7 @@ func TestProgressWriter_NonInteractive_FinishJob_NotFound(t *testing.T) {
 
 func TestProgressWriter_NonInteractive_FinishJob_WithTransfers(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 	pw.FinishJob(ItemResult{
@@ -84,7 +84,7 @@ func TestProgressWriter_NonInteractive_FinishJob_WithTransfers(t *testing.T) {
 
 func TestProgressWriter_SkipJob(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.SkipJob("projects")
 
@@ -102,7 +102,7 @@ func TestProgressWriter_SkipJob(t *testing.T) {
 
 func TestProgressWriter_NonInteractive_StartJob_NoOutput(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 
@@ -113,7 +113,7 @@ func TestProgressWriter_NonInteractive_StartJob_NoOutput(t *testing.T) {
 
 func TestProgressWriter_NonInteractive_UpdateProgress_NoOutput(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, false, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{})
 
 	pw.StartJob(context.Background(), "photos")
 	pw.UpdateProgress("45%, 2.30 MB/s")
@@ -124,11 +124,11 @@ func TestProgressWriter_NonInteractive_UpdateProgress_NoOutput(t *testing.T) {
 }
 
 func TestProgressWriter_Interactive_Returns(t *testing.T) {
-	pw := NewProgressWriter(&bytes.Buffer{}, true, false)
+	pw := NewProgressWriter(&bytes.Buffer{}, ProgressOptions{Mode: ProgressInteractive})
 	if !pw.Interactive() {
 		t.Error("Interactive() should be true")
 	}
-	pw2 := NewProgressWriter(&bytes.Buffer{}, false, false)
+	pw2 := NewProgressWriter(&bytes.Buffer{}, ProgressOptions{})
 	if pw2.Interactive() {
 		t.Error("Interactive() should be false")
 	}
@@ -136,10 +136,9 @@ func TestProgressWriter_Interactive_Returns(t *testing.T) {
 
 func TestProgressWriter_Interactive_FinishJob_ClearsLine(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, true, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{Mode: ProgressInteractive})
 
 	pw.StartJob(context.Background(), "photos")
-	time.Sleep(100 * time.Millisecond)
 	pw.FinishJob(ItemResult{
 		Status: StatusOK,
 		Stats:  TransferStats{FilesChecked: 919, Elapsed: 5 * time.Second},
@@ -156,7 +155,7 @@ func TestProgressWriter_Interactive_FinishJob_ClearsLine(t *testing.T) {
 
 func TestProgressWriter_Interactive_MultipleJobs(t *testing.T) {
 	var buf bytes.Buffer
-	pw := NewProgressWriter(&buf, true, false)
+	pw := NewProgressWriter(&buf, ProgressOptions{Mode: ProgressInteractive})
 
 	pw.StartJob(context.Background(), "job1")
 	pw.FinishJob(ItemResult{Status: StatusOK, Stats: TransferStats{FilesChecked: 100}})
@@ -173,38 +172,5 @@ func TestProgressWriter_Interactive_MultipleJobs(t *testing.T) {
 	}
 	if !strings.Contains(out, "failed") {
 		t.Error("missing failure status")
-	}
-}
-
-func TestSanitizeProgress(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain stats unchanged", "604 KiB / 1 MiB, 59%, 206 KiB/s, ETA 2s", "604 KiB / 1 MiB, 59%, 206 KiB/s, ETA 2s"},
-		{"bare ESC stripped", "evil\x1bxstats", "evilxstats"},
-		{"CSI clear-screen stripped", "a\x1b[2Jb", "a[2Jb"},
-		{"OSC title stripped", "x\x1b]0;pwned\x07y", "x]0;pwnedy"},
-		{"DEL stripped", "a\x7fb", "ab"},
-		{"newline and tab stripped", "a\nb\tc", "abc"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := sanitizeProgress(tt.in); got != tt.want {
-				t.Errorf("sanitizeProgress(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestUpdateProgress_StoresSanitizedText(t *testing.T) {
-	pw := NewProgressWriter(&bytes.Buffer{}, true, false) // interactive so UpdateProgress stores
-	pw.UpdateProgress("danger\x1b]0;x\x07 100%")
-	pw.mu.Lock()
-	got := pw.currentProgress
-	pw.mu.Unlock()
-	if strings.ContainsAny(got, "\x1b\x07") {
-		t.Errorf("currentProgress retains control bytes: %q", got)
 	}
 }

@@ -82,7 +82,7 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 		t.Fatalf("creating logger: %v", err)
 	}
 	t.Cleanup(logger.Close)
-	pw := NewProgressWriter(io.Discard, false, false)
+	pw := NewProgressWriter(io.Discard, ProgressOptions{})
 	runner, err := NewRunner(RunnerConfig{
 		Plan:          plan,
 		ConfigPath:    configPath,
@@ -311,7 +311,7 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 			Plan:          plan,
 			ConfigPath:    configPath,
 			Logger:        logger,
-			Progress:      NewProgressWriter(io.Discard, false, false),
+			Progress:      NewProgressWriter(io.Discard, ProgressOptions{}),
 			Prerequisites: NewSystemPrerequisiteChecker(),
 			Locker:        newTestFileRunLocker(t),
 			Rsync:         NewRsyncExecutor(logger),

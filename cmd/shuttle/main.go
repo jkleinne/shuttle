@@ -46,9 +46,9 @@ type cliFlags struct {
 }
 
 type colorInputs struct {
-	mode             string
-	stdoutIsTerminal bool
-	noColor          bool
+	mode               string
+	stdoutIsTerminal   bool
+	isNoColorRequested bool
 }
 
 type runPreparation struct {
@@ -56,7 +56,7 @@ type runPreparation struct {
 	configPath       string
 	logRetentionDays int
 	verbosity        log.Verbosity
-	useColor         bool
+	colorMode        engine.TerminalColorMode
 	interactive      bool
 	dryRun           bool
 }
@@ -66,7 +66,7 @@ type runSession struct {
 	logPath   string
 	runner    *engine.Runner
 	verbosity log.Verbosity
-	useColor  bool
+	colorMode engine.TerminalColorMode
 }
 
 type passwordPrompt struct {
@@ -158,10 +158,11 @@ func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
-		Run: func(_ *cobra.Command, _ []string) {
-			fmt.Printf("shuttle %s\n", version)
-			fmt.Printf("commit: %s\n", commit)
-			fmt.Printf("built:  %s\n", date)
+		Run: func(command *cobra.Command, _ []string) {
+			output := command.OutOrStdout()
+			_, _ = fmt.Fprintf(output, "shuttle %s\n", engine.SanitizeTerminalText(version))
+			_, _ = fmt.Fprintf(output, "commit: %s\n", engine.SanitizeTerminalText(commit))
+			_, _ = fmt.Fprintf(output, "built:  %s\n", engine.SanitizeTerminalText(date))
 		},
 	}
 }
@@ -170,7 +171,7 @@ func newValidateCommand(cli *cliFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",
 		Short: "Check configuration file for errors",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(command *cobra.Command, _ []string) error {
 			path, _, err := resolveConfigPath(cli.ConfigPath)
 			if err != nil {
 				return err
@@ -178,7 +179,11 @@ func newValidateCommand(cli *cliFlags) *cobra.Command {
 			if _, err := config.LoadFile(path); err != nil {
 				return err
 			}
-			fmt.Printf("config ok: %s\n", path)
+			_, _ = fmt.Fprintf(
+				command.OutOrStdout(),
+				"config ok: %s\n",
+				engine.SanitizeTerminalText(path),
+			)
 			return nil
 		},
 		SilenceUsage:  true,
@@ -202,12 +207,12 @@ func newDoctorCommand(cli *cliFlags) *cobra.Command {
 				LoadErr:  loadErr,
 				Explicit: explicit,
 			})
-			useColor := resolveColor(colorInputs{
-				mode:             cli.ColorMode,
-				stdoutIsTerminal: term.IsTerminal(int(os.Stdout.Fd())),
-				noColor:          os.Getenv("NO_COLOR") != "",
+			colorMode := resolveColor(colorInputs{
+				mode:               cli.ColorMode,
+				stdoutIsTerminal:   term.IsTerminal(int(os.Stdout.Fd())),
+				isNoColorRequested: os.Getenv("NO_COLOR") != "",
 			})
-			engine.RenderReport(os.Stdout, report, useColor)
+			engine.RenderReport(command.OutOrStdout(), report, colorMode)
 			if report.HasFailures() {
 				return errDoctorFailed
 			}
@@ -283,7 +288,7 @@ func commandExitCode(ctx context.Context, err error) int {
 	case errors.Is(err, errDoctorFailed):
 		return exitUsageError
 	case err != nil:
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %s\n", engine.SanitizeTerminalText(err.Error()))
 		return exitUsageError
 	default:
 		return exitSuccess
@@ -395,17 +400,20 @@ func expandHome(path string) (string, error) {
 // environment variable is set. NO_COLOR forces color off regardless of mode
 // per https://no-color.org. Kept pure (no env access) so it is trivially
 // testable; the caller reads NO_COLOR at the boundary.
-func resolveColor(inputs colorInputs) bool {
-	if inputs.noColor {
-		return false
+func resolveColor(inputs colorInputs) engine.TerminalColorMode {
+	if inputs.isNoColorRequested {
+		return engine.TerminalColorDisabled
 	}
 	switch inputs.mode {
 	case colorAlways:
-		return true
+		return engine.TerminalColorEnabled
 	case colorNever:
-		return false
+		return engine.TerminalColorDisabled
 	default: // colorAuto
-		return inputs.stdoutIsTerminal
+		if inputs.stdoutIsTerminal {
+			return engine.TerminalColorEnabled
+		}
+		return engine.TerminalColorDisabled
 	}
 }
 
@@ -471,10 +479,10 @@ func prepareRun(cli cliFlags) (runPreparation, error) {
 		configPath:       configPath,
 		logRetentionDays: cfg.ResolvedLogRetentionDays(),
 		verbosity:        resolveVerbosity(cli.Quiet, cli.Verbose),
-		useColor: resolveColor(colorInputs{
-			mode:             cli.ColorMode,
-			stdoutIsTerminal: stdoutIsTerminal,
-			noColor:          os.Getenv("NO_COLOR") != "",
+		colorMode: resolveColor(colorInputs{
+			mode:               cli.ColorMode,
+			stdoutIsTerminal:   stdoutIsTerminal,
+			isNoColorRequested: os.Getenv("NO_COLOR") != "",
 		}),
 		interactive: stdoutIsTerminal,
 		dryRun:      cli.RunOpts.DryRun,
@@ -507,6 +515,10 @@ func openRunSession(preparation runPreparation) (runSession, error) {
 		progressOut = io.Discard
 		progressInteractive = false
 	}
+	progressMode := engine.ProgressNonInteractive
+	if progressInteractive {
+		progressMode = engine.ProgressInteractive
+	}
 
 	runner, err := engine.NewRunner(engine.RunnerConfig{
 		Plan:       preparation.plan,
@@ -514,8 +526,10 @@ func openRunSession(preparation runPreparation) (runSession, error) {
 		Logger:     logger,
 		Progress: engine.NewProgressWriter(
 			progressOut,
-			progressInteractive,
-			preparation.useColor,
+			engine.ProgressOptions{
+				Mode:  progressMode,
+				Color: preparation.colorMode,
+			},
 		),
 		Prerequisites: engine.NewSystemPrerequisiteChecker(),
 		Locker:        engine.NewFileRunLocker(),
@@ -531,7 +545,7 @@ func openRunSession(preparation runPreparation) (runSession, error) {
 		logPath:   logPath,
 		runner:    runner,
 		verbosity: preparation.verbosity,
-		useColor:  preparation.useColor,
+		colorMode: preparation.colorMode,
 	}, nil
 }
 
@@ -547,7 +561,7 @@ func openRunLogger(preparation runPreparation) (*log.Logger, string, error) {
 	)
 	logger, logPath, err := log.New(
 		logDir,
-		preparation.useColor,
+		preparation.colorMode == engine.TerminalColorEnabled,
 		preparation.verbosity,
 	)
 	if err != nil {
@@ -575,14 +589,21 @@ func executePlan(ctx context.Context, session runSession) (engine.Summary, error
 }
 
 func renderRunResult(session runSession, summary engine.Summary) error {
+	var output io.Writer
 	if session.verbosity == log.VerbosityQuiet {
 		if summary.HasErrors() {
-			engine.RenderSummary(os.Stderr, summary, session.useColor)
-			fmt.Fprintf(os.Stderr, "\nLog: %s\n", session.logPath)
+			output = os.Stderr
 		}
 	} else {
-		engine.RenderSummary(os.Stdout, summary, session.useColor)
-		fmt.Printf("\nLog: %s\n", session.logPath)
+		output = os.Stdout
+	}
+	if output != nil {
+		engine.RenderSummary(output, summary, session.colorMode)
+		_, _ = fmt.Fprintf(
+			output,
+			"\nLog: %s\n",
+			engine.SanitizeTerminalText(session.logPath),
+		)
 	}
 	if summary.HasErrors() {
 		return errPartialFailure

@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 
+	"github.com/jkleinne/shuttle/internal/engine"
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
@@ -117,27 +119,27 @@ func TestResolveColor(t *testing.T) {
 		mode        string
 		stdoutIsTTY bool
 		noColor     bool
-		want        bool
+		want        engine.TerminalColorMode
 	}{
-		{"never + TTY", colorNever, true, false, false},
-		{"never + non-TTY", colorNever, false, false, false},
-		{"always + TTY", colorAlways, true, false, true},
-		{"always + non-TTY", colorAlways, false, false, true},
-		{"auto + TTY", colorAuto, true, false, true},
-		{"auto + non-TTY", colorAuto, false, false, false},
-		{"NO_COLOR overrides always + TTY", colorAlways, true, true, false},
-		{"NO_COLOR overrides always + non-TTY", colorAlways, false, true, false},
-		{"NO_COLOR overrides auto + TTY", colorAuto, true, true, false},
-		{"NO_COLOR overrides auto + non-TTY", colorAuto, false, true, false},
-		{"NO_COLOR with never", colorNever, true, true, false},
-		{"NO_COLOR with never non-TTY", colorNever, false, true, false},
+		{"never + TTY", colorNever, true, false, engine.TerminalColorDisabled},
+		{"never + non-TTY", colorNever, false, false, engine.TerminalColorDisabled},
+		{"always + TTY", colorAlways, true, false, engine.TerminalColorEnabled},
+		{"always + non-TTY", colorAlways, false, false, engine.TerminalColorEnabled},
+		{"auto + TTY", colorAuto, true, false, engine.TerminalColorEnabled},
+		{"auto + non-TTY", colorAuto, false, false, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides always + TTY", colorAlways, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides always + non-TTY", colorAlways, false, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides auto + TTY", colorAuto, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides auto + non-TTY", colorAuto, false, true, engine.TerminalColorDisabled},
+		{"NO_COLOR with never", colorNever, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR with never non-TTY", colorNever, false, true, engine.TerminalColorDisabled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := resolveColor(colorInputs{
-				mode:             tc.mode,
-				stdoutIsTerminal: tc.stdoutIsTTY,
-				noColor:          tc.noColor,
+				mode:               tc.mode,
+				stdoutIsTerminal:   tc.stdoutIsTTY,
+				isNoColorRequested: tc.noColor,
 			})
 			if got != tc.want {
 				t.Errorf("resolveColor() = %v, want %v", got, tc.want)
@@ -195,6 +197,28 @@ func TestCLI_Version_PrintsVersionCommitAndDate(t *testing.T) {
 	}
 }
 
+func TestVersionCommand_SanitizesBuildMetadata(t *testing.T) {
+	originalVersion, originalCommit, originalDate := version, commit, date
+	t.Cleanup(func() {
+		version, commit, date = originalVersion, originalCommit, originalDate
+	})
+	version = "v1\x1b[31m\n\t"
+	commit = "abc\x1b]0;title\x07\u009b32m"
+	date = "today\x7f"
+
+	command := newVersionCommand()
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("version command error = %v", err)
+	}
+	want := "shuttle v1[31m\ncommit: abc]0;title32m\nbuilt:  today\n"
+	if got := output.String(); got != want {
+		t.Errorf("version output = %q, want %q", got, want)
+	}
+}
+
 func TestCLI_Validate_ValidConfig_Succeeds(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
@@ -212,6 +236,25 @@ destination = %q
 	}
 	if !strings.Contains(result.stdout, "config ok") {
 		t.Errorf("stdout = %q, want it to contain 'config ok'", result.stdout)
+	}
+}
+
+func TestValidateCommand_SanitizesDisplayedConfigPath(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "valid\n\t\x1b[2J\u009b31m\x7f.toml")
+	_ = writeConfigTo(t, configPath, rsyncJobTOML(t, source, destination))
+	cli := &cliFlags{ConfigPath: configPath}
+	command := newValidateCommand(cli)
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("validate command error = %v", err)
+	}
+	want := "config ok: " + engine.SanitizeTerminalText(configPath) + "\n"
+	if got := output.String(); got != want {
+		t.Errorf("validate output = %q, want %q", got, want)
 	}
 }
 
@@ -496,6 +539,39 @@ destination = %q
 	}
 }
 
+func TestCLI_QuietFailure_SanitizesDisplayedLogPath(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	missingSource := filepath.Join(t.TempDir(), "missing")
+	env := writeConfig(t, fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "quiet-fail"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, missingSource, t.TempDir()))
+	stateHome := filepath.Join(t.TempDir(), "state\n\t\x1b[2J\u009b31m\x7f")
+	env[1] = "XDG_STATE_HOME=" + stateHome
+
+	result := runShuttle(t, env, "--quiet")
+
+	if result.exitCode != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitPartialFailure, result.stderr)
+	}
+	wantLogDir := engine.SanitizeTerminalText(filepath.Join(stateHome, "shuttle", "logs"))
+	logLineStart := strings.LastIndex(result.stderr, "\nLog: ")
+	if logLineStart == -1 || !strings.Contains(result.stderr[logLineStart:], wantLogDir) {
+		t.Errorf("stderr = %q, want sanitized log directory %q", result.stderr, wantLogDir)
+	}
+	if strings.Contains(result.stderr, "\x1b[2J") || strings.Contains(result.stderr, "\u009b31m") {
+		t.Errorf("stderr retained injected log path controls: %q", result.stderr)
+	}
+}
+
 func TestCLI_Verbose_PrintsExecLines(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")
@@ -554,6 +630,40 @@ destination = %q
 	}
 	if !strings.Contains(result.stdout, "\x1b[") {
 		t.Errorf("--color=always should emit ANSI codes on piped stdout, got: %q", result.stdout)
+	}
+}
+
+func TestCLI_RunSuccess_SanitizesDisplayedLogPath(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	source := t.TempDir()
+	destination := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "log-path"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, source, destination))
+	stateHome := filepath.Join(t.TempDir(), "state\n\t\x1b[2J\u009b31m\x7f")
+	env[1] = "XDG_STATE_HOME=" + stateHome
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitSuccess, result.stderr)
+	}
+	wantLogDir := engine.SanitizeTerminalText(filepath.Join(stateHome, "shuttle", "logs"))
+	logLineStart := strings.LastIndex(result.stdout, "\nLog: ")
+	if logLineStart == -1 || !strings.Contains(result.stdout[logLineStart:], wantLogDir) {
+		t.Errorf("stdout = %q, want sanitized log directory %q", result.stdout, wantLogDir)
+	}
+	if strings.Contains(result.stdout, "\x1b[2J") || strings.Contains(result.stdout, "\u009b31m") {
+		t.Errorf("stdout retained injected log path controls: %q", result.stdout)
 	}
 }
 
@@ -770,6 +880,38 @@ func TestCLI_ConfigFlag_MissingPath_UsageError(t *testing.T) {
 	}
 	if !strings.Contains(result.stderr, missing) {
 		t.Errorf("stderr should mention the path %q, got: %q", missing, result.stderr)
+	}
+}
+
+func TestCLI_MissingControlBearingConfigPath_SanitizesOneErrorRecord(t *testing.T) {
+	missing := filepath.Join(
+		t.TempDir(),
+		"missing\n\t\x1b[2J\x1b]0;title\x07\u009b31m\x7f.toml",
+	)
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	result := runShuttle(t, env, "validate", "--config", missing)
+
+	if result.exitCode != exitUsageError {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitUsageError, result.stderr)
+	}
+	if count := strings.Count(result.stderr, "Error:"); count != 1 {
+		t.Errorf("Error record count = %d, want 1; stderr: %q", count, result.stderr)
+	}
+	if count := strings.Count(result.stderr, "\n"); count != 1 {
+		t.Errorf("stderr line count = %d, want 1; stderr: %q", count, result.stderr)
+	}
+	if wantPath := engine.SanitizeTerminalText(missing); !strings.Contains(result.stderr, wantPath) {
+		t.Errorf("stderr = %q, want sanitized path %q", result.stderr, wantPath)
+	}
+	for _, r := range strings.TrimSuffix(result.stderr, "\n") {
+		if unicode.IsControl(r) {
+			t.Errorf("stderr retained control rune %U: %q", r, result.stderr)
+		}
 	}
 }
 
@@ -1001,6 +1143,31 @@ filter_file = "/no/such/filter.txt"
 	res := runShuttle(t, env, "doctor")
 	if res.exitCode != 2 {
 		t.Fatalf("exit = %d, want 2\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
+}
+
+func TestDoctorCommand_UsesCommandOutput(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "doctor.toml")
+	_ = writeConfigTo(t, configPath, `
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp"]
+destination = "/tmp/backup"
+`)
+	t.Setenv("PATH", t.TempDir())
+	cli := &cliFlags{ConfigPath: configPath, ColorMode: colorNever}
+	command := newDoctorCommand(cli)
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	err := command.Execute()
+
+	if !errors.Is(err, errDoctorFailed) {
+		t.Fatalf("doctor command error = %v, want %v", err, errDoctorFailed)
+	}
+	if !strings.Contains(output.String(), "shuttle doctor") {
+		t.Errorf("command output = %q, want doctor report", output.String())
 	}
 }
 
