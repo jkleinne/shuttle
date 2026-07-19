@@ -7,6 +7,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,10 +138,17 @@ func LoadFile(path string) (*Config, error) {
 }
 
 // LoadBytes parses TOML config from raw bytes, expands tilde paths, and validates.
-// Useful for testing or when config content is already in memory.
+// Strict decoding prevents misspelled keys from silently changing backup intent.
 func LoadBytes(data []byte) (*Config, error) {
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	decoder := toml.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		var strictErr *toml.StrictMissingError
+		if errors.As(err, &strictErr) && len(strictErr.Errors) > 0 {
+			fieldPath := strings.Join(strictErr.Errors[0].Key(), ".")
+			return nil, fmt.Errorf("parsing config: unknown field %q: %w", fieldPath, err)
+		}
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := cfg.expandPaths(); err != nil {
@@ -328,7 +337,7 @@ func (c *Config) validate() error {
 	seen := make(map[string]bool, len(c.Jobs))
 	for _, job := range c.Jobs {
 		if job.Name == "" {
-			return fmt.Errorf("job has empty name")
+			return errors.New("job has empty name")
 		}
 		if seen[job.Name] {
 			return fmt.Errorf("duplicate job name %q", job.Name)

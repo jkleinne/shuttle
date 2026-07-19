@@ -146,6 +146,86 @@ backup_path = "~/backups/archive"
 	}
 }
 
+func TestLoadBytes_UnknownField_ReturnsContextualError(t *testing.T) {
+	tests := []struct {
+		name       string
+		tomlData   string
+		unknownKey string
+	}{
+		{
+			name: "top level",
+			tomlData: `
+unexpected = true
+
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp/source"]
+destination = "/tmp/destination"
+`,
+			unknownKey: "unexpected",
+		},
+		{
+			name: "rsync defaults section",
+			tomlData: `
+[defaults.rsync]
+flags = ["-a"]
+flgas = ["--delete"]
+
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp/source"]
+destination = "/tmp/destination"
+`,
+			unknownKey: "flgas",
+		},
+		{
+			name: "rclone defaults section",
+			tomlData: `
+[defaults.rclone]
+flags = ["--fast-list"]
+trasnfers = 4
+
+[[job]]
+name = "cloud"
+engine = "rclone"
+source = "/tmp/source"
+remotes = ["backup"]
+mode = "copy"
+`,
+			unknownKey: "trasnfers",
+		},
+		{
+			name: "job section",
+			tomlData: `
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp/source"]
+destination = "/tmp/destination"
+destinaton = "/tmp/typo"
+`,
+			unknownKey: "destinaton",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := config.LoadBytes([]byte(test.tomlData))
+			if err == nil {
+				t.Fatal("LoadBytes() = nil error, want unknown-field error")
+			}
+			if !strings.Contains(err.Error(), "parsing config") {
+				t.Errorf("error = %q, want parsing context", err)
+			}
+			if !strings.Contains(err.Error(), test.unknownKey) {
+				t.Errorf("error = %q, want unknown key %q", err, test.unknownKey)
+			}
+		})
+	}
+}
+
 func TestValidate_DuplicateJobNames_ReturnsError(t *testing.T) {
 	_, err := config.LoadFile(testdataPath("config_invalid_duplicate_job.toml"))
 	if err == nil {
