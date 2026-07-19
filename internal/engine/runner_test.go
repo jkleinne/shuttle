@@ -41,9 +41,7 @@ func TestValidateJobNames_SkipAndOnlyConflict(t *testing.T) {
 	}
 }
 
-type stubRunnerLogger struct {
-	logPath string
-}
+type stubRunnerLogger struct{}
 
 func (l *stubRunnerLogger) Header(string)     {}
 func (l *stubRunnerLogger) Info(string)       {}
@@ -55,7 +53,6 @@ func (l *stubRunnerLogger) FileHeader(string) {}
 func (l *stubRunnerLogger) FileInfo(string)   {}
 func (l *stubRunnerLogger) FileWarn(string)   {}
 func (l *stubRunnerLogger) FileError(string)  {}
-func (l *stubRunnerLogger) LogPath() string   { return l.logPath }
 
 type stubRunnerProgress struct{}
 
@@ -119,7 +116,7 @@ func validRunnerConfig(t *testing.T, plan RunPlan) RunnerConfig {
 	return RunnerConfig{
 		Plan:          plan,
 		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
-		Logger:        &stubRunnerLogger{logPath: filepath.Join(t.TempDir(), "shuttle.log")},
+		Logger:        &stubRunnerLogger{},
 		Progress:      &stubRunnerProgress{},
 		Prerequisites: &stubPrerequisiteChecker{},
 		Locker:        &stubRunLocker{},
@@ -164,20 +161,6 @@ func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
 			name:      "nil logger",
 			change:    func(rc *RunnerConfig) { rc.Logger = nil },
 			wantError: "logger",
-		},
-		{
-			name: "empty log path",
-			change: func(rc *RunnerConfig) {
-				rc.Logger = &stubRunnerLogger{}
-			},
-			wantError: "log path",
-		},
-		{
-			name: "relative log path",
-			change: func(rc *RunnerConfig) {
-				rc.Logger = &stubRunnerLogger{logPath: "shuttle.log"}
-			},
-			wantError: "log path",
 		},
 		{
 			name:      "nil progress",
@@ -357,7 +340,10 @@ func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
 func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 	t.Helper()
 	logFile := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(termBuf, logFile, false, log.VerbosityNormal)
+	logger, err := log.NewWithWriter(termBuf, logFile, log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
@@ -371,7 +357,7 @@ func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 		Prerequisites: &stubPrerequisiteChecker{},
 		Locker:        &stubRunLocker{},
 		Rsync:         NewRsyncExecutor(logger),
-		Rclone:        NewRcloneExecutor(logger, logFile, ""),
+		Rclone:        NewRcloneExecutor(logger, ""),
 	})
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)

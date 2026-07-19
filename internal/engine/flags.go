@@ -19,18 +19,34 @@ type WarningLogger interface {
 // flags can override via last-flag-wins semantics.
 const (
 	rsyncInfoProgressFlag = "--info=progress2"
+	rsyncOutFormatFlag    = "--out-format=%i %n%L"
+	rcloneUseJSONLogFlag  = "--use-json-log"
 	transferStatsFlag     = "--stats"
 )
 
-var rsyncInstrumentationFlags = []string{transferStatsFlag, rsyncInfoProgressFlag}
+var rsyncInstrumentationFlags = []string{
+	transferStatsFlag,
+	rsyncInfoProgressFlag,
+	rsyncOutFormatFlag,
+}
 
 // rsyncInstrumentationKeys lists the flag prefixes Shuttle checks when warning
 // about conflicts in rsync extra_flags.
-var rsyncInstrumentationKeys = []string{transferStatsFlag, rsyncInfoProgressFlag}
+var rsyncInstrumentationKeys = []string{
+	transferStatsFlag,
+	rsyncInfoProgressFlag,
+	"--out-format",
+	"--log-format",
+}
 
 // rcloneInstrumentationKeys lists the flag prefixes Shuttle checks when warning
 // about conflicts in rclone extra_flags.
-var rcloneInstrumentationKeys = []string{transferStatsFlag, "--log-file", "--log-level"}
+var rcloneInstrumentationKeys = []string{
+	transferStatsFlag,
+	rcloneUseJSONLogFlag,
+	"--log-level",
+	"--log-file",
+}
 
 // RsyncArgsRequest carries the inputs for one rsync argument assembly.
 // Grouped into a struct (mirroring RunnerConfig) so call sites name each
@@ -48,13 +64,11 @@ type RsyncArgsRequest struct {
 	IsDeleteDir bool
 	// DryRun requests rsync's non-mutating execution mode at the boundary.
 	DryRun bool
-	// LogFile keeps rsync output aligned with the runner logger's authoritative file.
-	LogFile string
 }
 
 // BuildRsyncArgs assembles the full argument list for an rsync invocation.
 // Order: instrumentation (lowest precedence) → default flags → per-job
-// extra_flags → behavioral flags (delete, dry-run, log-file) → source → dest.
+// extra_flags → behavioral flags (delete, dry-run) → source → dest.
 //
 // Instrumentation flags come first so user flags can override via last-flag-wins
 // rsync semantics.
@@ -79,10 +93,6 @@ func BuildRsyncArgs(req RsyncArgsRequest) []string {
 	if req.DryRun {
 		args = append(args, "--dry-run")
 	}
-	if req.LogFile != "" {
-		args = append(args, "--log-file="+req.LogFile)
-	}
-
 	// 5. Source and destination are always last.
 	args = append(args, req.Source, req.Destination)
 
@@ -103,8 +113,6 @@ type RcloneArgsRequest struct {
 	Destination string
 	// DryRun requests rclone's non-mutating execution mode at the boundary.
 	DryRun bool
-	// LogFile keeps rclone stats capture aligned with the runner logger's authoritative file.
-	LogFile string
 	// BackupDirArg carries the pre-built retention target, with an empty value omitting the flag.
 	BackupDirArg string
 }
@@ -121,10 +129,16 @@ func BuildRcloneArgs(req RcloneArgsRequest) []string {
 
 	// The subcommand (copy/sync) is always first, immediately followed by
 	// instrumentation flags (step 1).
-	args = append(args, req.Subcommand, transferStatsFlag, "1s", "-P")
-	if req.LogFile != "" {
-		args = append(args, "--log-file", req.LogFile, "--log-level", "INFO")
-	}
+	args = append(
+		args,
+		req.Subcommand,
+		transferStatsFlag,
+		"1s",
+		"-P",
+		rcloneUseJSONLogFlag,
+		"--log-level",
+		"INFO",
+	)
 
 	// 2. Default flags from [defaults.rclone].
 	if req.Defaults != nil {

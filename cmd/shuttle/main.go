@@ -534,7 +534,7 @@ func openRunSession(preparation runPreparation) (runSession, error) {
 		Prerequisites: engine.NewSystemPrerequisiteChecker(),
 		Locker:        engine.NewFileRunLocker(),
 		Rsync:         engine.NewRsyncExecutor(logger),
-		Rclone:        engine.NewRcloneExecutor(logger, logPath, rclonePassword),
+		Rclone:        engine.NewRcloneExecutor(logger, rclonePassword),
 	})
 	if err != nil {
 		logger.Close()
@@ -561,8 +561,10 @@ func openRunLogger(preparation runPreparation) (*log.Logger, string, error) {
 	)
 	logger, logPath, err := log.New(
 		logDir,
-		preparation.colorMode == engine.TerminalColorEnabled,
-		preparation.verbosity,
+		log.Options{
+			UseColor:  preparation.colorMode == engine.TerminalColorEnabled,
+			Verbosity: preparation.verbosity,
+		},
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("setting up logging: %w", err)

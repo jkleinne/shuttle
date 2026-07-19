@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -21,9 +20,59 @@ type RsyncExecutor struct {
 	logger *log.Logger
 }
 
+const rsyncHumanReadableUnits = "KMGTP"
+
 // NewRsyncExecutor returns a configured RsyncExecutor.
 func NewRsyncExecutor(logger *log.Logger) *RsyncExecutor {
 	return &RsyncExecutor{logger: logger}
+}
+
+func isASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isRsyncGroupedInteger(value string) bool {
+	groups := strings.Split(value, ",")
+	if len(groups) == 1 {
+		return isASCIIDigits(value)
+	}
+	if len(groups[0]) == 0 || len(groups[0]) > 3 || !isASCIIDigits(groups[0]) {
+		return false
+	}
+	for _, group := range groups[1:] {
+		if len(group) != 3 || !isASCIIDigits(group) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRsyncHumanReadableNumber(value string) bool {
+	if len(value) < 2 || !strings.ContainsRune(rsyncHumanReadableUnits, rune(value[len(value)-1])) {
+		return false
+	}
+	number := value[:len(value)-1]
+	separator := strings.IndexAny(number, ".,")
+	if separator < 0 {
+		return isASCIIDigits(number)
+	}
+	fraction := number[separator+1:]
+	if strings.ContainsAny(fraction, ".,") || len(fraction) == 0 || len(fraction) > 2 {
+		return false
+	}
+	return isASCIIDigits(number[:separator]) && isASCIIDigits(fraction)
+}
+
+func isRsyncByteCounter(value string) bool {
+	return isRsyncGroupedInteger(value) || isRsyncHumanReadableNumber(value)
 }
 
 // parseRsyncProgress extracts a progress string from an rsync --info=progress2
@@ -36,10 +85,16 @@ func parseRsyncProgress(segment string) string {
 	if len(fields) < 3 {
 		return ""
 	}
+	if !isRsyncByteCounter(fields[0]) {
+		return ""
+	}
 
 	var pct, speed, eta string
+	isProgressRecord := false
 	for _, f := range fields {
 		switch {
+		case strings.HasPrefix(f, "(xfr#"):
+			isProgressRecord = true
 		case strings.HasSuffix(f, "%"):
 			pct = f
 		case strings.Contains(f, "/s"):
@@ -49,7 +104,7 @@ func parseRsyncProgress(segment string) string {
 		}
 	}
 
-	if pct == "" {
+	if pct == "" || !isProgressRecord {
 		return ""
 	}
 
@@ -64,76 +119,56 @@ func parseRsyncProgress(segment string) string {
 	return strings.Join(parts, ", ")
 }
 
-// scanRsyncProgress reads rsync stdout from r, writes the byte stream to
-// capture (preserving output for ParseRsyncStats), and extracts progress
-// updates from \r-delimited segments. Each progress update is passed to
-// onProgress. If onProgress is nil, bytes are still written to capture but no
-// parsing occurs.
+// scanRsyncProgress drains bounded records for focused progress tests. The
+// executor uses the same capture primitive and adds trusted tool framing.
 func scanRsyncProgress(r io.Reader, capture io.Writer, onProgress func(string)) {
-	buf := make([]byte, 4096)
-	var segment []byte
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			_, _ = capture.Write(buf[:n])
-
-			if onProgress != nil {
-				for _, b := range buf[:n] {
-					switch b {
-					case '\r':
-						if progress := parseRsyncProgress(string(segment)); progress != "" {
-							onProgress(progress)
-						}
-						segment = segment[:0]
-					case '\n':
-						segment = segment[:0]
-					default:
-						segment = append(segment, b)
-					}
-				}
+	_ = captureDelimitedRecords(r, func(record string) {
+		_, _ = io.WriteString(capture, record+"\n")
+		if onProgress != nil {
+			if progress := parseRsyncProgress(record); progress != "" {
+				onProgress(progress)
 			}
 		}
-		if err != nil {
-			return
+	})
+}
+
+func (e *RsyncExecutor) captureStdoutRecord(
+	record string,
+	statsTail *tailBuffer,
+	onProgress func(string),
+) {
+	_, _ = io.WriteString(statsTail, record+"\n")
+	if progress := parseRsyncProgress(record); progress != "" {
+		if onProgress != nil {
+			onProgress(progress)
 		}
+		return
 	}
+	e.logger.FileTool("rsync", record)
 }
 
-// rsyncCaptureTailBytes bounds in-memory capture of rsync stdout. Only the
-// trailing --stats block (~600 bytes) is parsed after the run; without a
-// bound, user flags like -v make the captured listing grow with file count.
-const rsyncCaptureTailBytes = 64 * 1024
-
-// tailBuffer is an io.Writer retaining only the last capacity bytes written.
-// Hand-rolled because the stdlib has no bounded byte-tail writer:
-// bytes.Buffer is unbounded and container/ring is element-oriented.
-type tailBuffer struct {
-	capacity int
-	buf      []byte
-}
-
-func newTailBuffer(capacity int) *tailBuffer {
-	return &tailBuffer{capacity: capacity}
-}
-
-// Write keeps the suffix of the stream within capacity. It never fails; the
-// error return exists to satisfy io.Writer.
-func (t *tailBuffer) Write(p []byte) (int, error) {
-	if len(p) >= t.capacity {
-		t.buf = append(t.buf[:0], p[len(p)-t.capacity:]...)
-		return len(p), nil
-	}
-	if overflow := len(t.buf) + len(p) - t.capacity; overflow > 0 {
-		t.buf = append(t.buf[:0], t.buf[overflow:]...)
-	}
-	t.buf = append(t.buf, p...)
-	return len(p), nil
-}
-
-// Bytes returns the retained tail. The slice aliases internal storage and is
-// valid until the next Write.
-func (t *tailBuffer) Bytes() []byte {
-	return t.buf
+func (e *RsyncExecutor) drainOutput(
+	stdout io.Reader,
+	stderr io.Reader,
+	capture *tailBuffer,
+	onProgress func(string),
+) (stdoutReadErr, stderrReadErr error) {
+	var pipeWg sync.WaitGroup
+	pipeWg.Add(2)
+	go func() {
+		defer pipeWg.Done()
+		stdoutReadErr = captureDelimitedRecords(stdout, func(record string) {
+			e.captureStdoutRecord(record, capture, onProgress)
+		})
+	}()
+	go func() {
+		defer pipeWg.Done()
+		stderrReadErr = captureDelimitedRecords(stderr, func(record string) {
+			e.logger.FileTool("rsync", record)
+		})
+	}()
+	pipeWg.Wait()
+	return stdoutReadErr, stderrReadErr
 }
 
 // Exec runs rsync with the given pre-assembled argument list.
@@ -147,7 +182,7 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 	name := filepath.Base(strings.TrimRight(source, "/"))
 
 	start := time.Now()
-	capture := newTailBuffer(rsyncCaptureTailBytes)
+	capture := newTailBuffer(statisticsTailBytes)
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
 	stdout, err := cmd.StdoutPipe()
@@ -155,8 +190,11 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 		e.logger.FileError(fmt.Sprintf("rsync pipe setup failed for %s: %v", source, err))
 		return ItemResult{Name: name, Status: StatusFailed}
 	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		e.logger.FileError(fmt.Sprintf("rsync stderr pipe setup failed for %s: %v", source, err))
+		return ItemResult{Name: name, Status: StatusFailed}
+	}
 
 	if err := cmd.Start(); err != nil {
 		status := classifyExitStatus(ctx, err)
@@ -168,24 +206,15 @@ func (e *RsyncExecutor) Exec(ctx context.Context, args []string, onProgress func
 		return ItemResult{Name: name, Status: status}
 	}
 
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(1)
-	go func() {
-		defer pipeWg.Done()
-		scanRsyncProgress(stdout, capture, onProgress)
-	}()
-
-	pipeWg.Wait()
+	stdoutReadErr, stderrReadErr := e.drainOutput(stdout, stderr, capture, onProgress)
 	runErr := cmd.Wait()
 	elapsed := time.Since(start)
 
-	// Log any stderr output to the log file for diagnostics.
-	if stderrBuf.Len() > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(stderrBuf.String()), "\n") {
-			if line != "" {
-				e.logger.FileError(line)
-			}
-		}
+	if stdoutReadErr != nil {
+		e.logger.FileError(fmt.Sprintf("reading rsync stdout for %s: %v", source, stdoutReadErr))
+	}
+	if stderrReadErr != nil {
+		e.logger.FileError(fmt.Sprintf("reading rsync stderr for %s: %v", source, stderrReadErr))
 	}
 
 	stats := ParseRsyncStats(capture.Bytes())

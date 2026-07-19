@@ -40,8 +40,6 @@ type RunnerLogger interface {
 	FileWarn(string)
 	// FileError records failures without disturbing interactive terminal presentation.
 	FileError(string)
-	// LogPath keeps command logging and logger storage pointed at one authoritative file.
-	LogPath() string
 }
 
 // RunnerProgress keeps terminal presentation outside runner orchestration.
@@ -96,7 +94,7 @@ type RunnerConfig struct {
 	Plan RunPlan
 	// ConfigPath provides a stable absolute identity for per-config locking.
 	ConfigPath string
-	// Logger routes run diagnostics and supplies the authoritative absolute log path.
+	// Logger routes run diagnostics.
 	Logger RunnerLogger
 	// Progress owns terminal presentation for job lifecycle events.
 	Progress RunnerProgress
@@ -123,13 +121,6 @@ func NewRunner(rc RunnerConfig) (*Runner, error) {
 	}
 	if isNilRunnerPort(rc.Logger) {
 		return nil, errors.New("invalid runner config: logger is nil")
-	}
-	logPath := rc.Logger.LogPath()
-	if logPath == "" {
-		return nil, errors.New("invalid runner config: logger log path is empty")
-	}
-	if !filepath.IsAbs(logPath) {
-		return nil, fmt.Errorf("invalid runner config: logger log path %q is not absolute", logPath)
 	}
 	if isNilRunnerPort(rc.Progress) {
 		return nil, errors.New("invalid runner config: progress is nil")
@@ -423,7 +414,6 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			Destination: job.Destination,
 			IsDeleteDir: job.Delete && isDir,
 			DryRun:      r.plan.dryRun,
-			LogFile:     r.logger.LogPath(),
 		})
 		r.logger.Debug(formatExec("rsync", args))
 
@@ -469,7 +459,6 @@ type rcloneArgumentsRequest struct {
 	remoteName   string
 	runTimestamp string
 	dryRun       bool
-	logPath      string
 }
 
 func resolveRcloneSource(source string) (rcloneSource, error) {
@@ -528,7 +517,6 @@ func (r *Runner) buildRcloneJobArguments(request rcloneArgumentsRequest) []strin
 		Source:       request.invocation.sourceArgument,
 		Destination:  request.invocation.destination,
 		DryRun:       request.dryRun,
-		LogFile:      request.logPath,
 		BackupDirArg: backupDirectoryArgument,
 	})
 }
@@ -576,7 +564,6 @@ func (r *Runner) runRcloneJob(ctx context.Context, request rcloneJobRequest) Job
 		remoteName:   request.remoteName,
 		runTimestamp: request.runTimestamp,
 		dryRun:       r.plan.dryRun,
-		logPath:      r.logger.LogPath(),
 	})
 	r.logger.Debug(formatExec("rclone", args))
 

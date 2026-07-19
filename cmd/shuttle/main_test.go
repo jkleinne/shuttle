@@ -1204,7 +1204,10 @@ optional = true
 
 func newPasswordTestLogger(t *testing.T, output io.Writer) *log.Logger {
 	t.Helper()
-	logger, err := log.NewWithWriter(output, filepath.Join(t.TempDir(), "t.log"), false, log.VerbosityNormal)
+	logger, err := log.NewWithWriter(output, filepath.Join(t.TempDir(), "t.log"), log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}

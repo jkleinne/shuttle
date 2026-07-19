@@ -77,7 +77,10 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 		t.Fatalf("BuildRunPlan() error = %v", err)
 	}
 	logFile := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(io.Discard, logFile, false, log.VerbosityNormal)
+	logger, err := log.NewWithWriter(io.Discard, logFile, log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
@@ -91,7 +94,7 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 		Prerequisites: NewSystemPrerequisiteChecker(),
 		Locker:        newTestFileRunLocker(t),
 		Rsync:         NewRsyncExecutor(logger),
-		Rclone:        NewRcloneExecutor(logger, logFile, ""),
+		Rclone:        NewRcloneExecutor(logger, ""),
 	})
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
@@ -302,7 +305,10 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 
 	newRunner := func(tag string) *Runner {
 		logFile := filepath.Join(t.TempDir(), tag+".log")
-		logger, err := log.NewWithWriter(io.Discard, logFile, false, log.VerbosityNormal)
+		logger, err := log.NewWithWriter(io.Discard, logFile, log.Options{
+			UseColor:  false,
+			Verbosity: log.VerbosityNormal,
+		})
 		if err != nil {
 			t.Fatalf("creating logger %s: %v", tag, err)
 		}
@@ -315,7 +321,7 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 			Prerequisites: NewSystemPrerequisiteChecker(),
 			Locker:        newTestFileRunLocker(t),
 			Rsync:         NewRsyncExecutor(logger),
-			Rclone:        NewRcloneExecutor(logger, logFile, ""),
+			Rclone:        NewRcloneExecutor(logger, ""),
 		})
 		if err != nil {
 			t.Fatalf("NewRunner() error = %v", err)

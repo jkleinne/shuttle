@@ -45,7 +45,7 @@ func runPlannedTest(
 	runner, err := NewRunner(RunnerConfig{
 		Plan:          plan,
 		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
-		Logger:        &stubRunnerLogger{logPath: filepath.Join(t.TempDir(), "shuttle.log")},
+		Logger:        &stubRunnerLogger{},
 		Progress:      &stubRunnerProgress{},
 		Prerequisites: &stubPrerequisiteChecker{},
 		Locker:        &stubRunLocker{},
@@ -116,6 +116,55 @@ func TestBuildRunPlan_SelectionPreservesExecutionOrder(t *testing.T) {
 	}
 	if status := summary.Jobs[0].Items[0].Status; status != StatusSkipped {
 		t.Errorf("skipped placeholder status = %q, want %q", status, StatusSkipped)
+	}
+}
+
+func TestRunner_DoesNotExposePrimaryLogPathToExecutors(t *testing.T) {
+	rsyncSource := t.TempDir()
+	rcloneSource := t.TempDir()
+	primaryLogPath := filepath.Join(t.TempDir(), "primary.log")
+	cfg := &config.Config{Jobs: []config.Job{
+		{
+			Name:        "local",
+			Engine:      config.EngineRsync,
+			Sources:     []string{rsyncSource},
+			Destination: t.TempDir(),
+		},
+		{
+			Name:    "cloud",
+			Engine:  config.EngineRclone,
+			Source:  rcloneSource,
+			Remotes: []string{"remote"},
+			Mode:    config.ModeCopy,
+		},
+	}}
+	plan, err := BuildRunPlan(cfg, RunOptions{})
+	if err != nil {
+		t.Fatalf("BuildRunPlan() error = %v", err)
+	}
+	rsync := &planRsyncRecorder{}
+	rclone := &planRcloneRecorder{}
+	runner, err := NewRunner(RunnerConfig{
+		Plan:          plan,
+		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
+		Logger:        &stubRunnerLogger{},
+		Progress:      &stubRunnerProgress{},
+		Prerequisites: &stubPrerequisiteChecker{},
+		Locker:        &stubRunLocker{},
+		Rsync:         rsync,
+		Rclone:        rclone,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, invocation := range append(rsync.args, rclone.args...) {
+		if strings.Contains(strings.Join(invocation, "\x00"), primaryLogPath) {
+			t.Errorf("executor arguments expose primary log path %q: %v", primaryLogPath, invocation)
+		}
 	}
 }
 
