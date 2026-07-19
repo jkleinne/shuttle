@@ -1,13 +1,23 @@
 package engine
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jkleinne/shuttle/internal/config"
-	"github.com/jkleinne/shuttle/internal/log"
 )
+
+type recordingWarningLogger struct {
+	messages []string
+}
+
+func (l *recordingWarningLogger) Warn(message string) {
+	l.messages = append(l.messages, message)
+}
+
+func (l *recordingWarningLogger) output() string {
+	return strings.Join(l.messages, "\n")
+}
 
 func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 	defaults := &config.RsyncDefaults{
@@ -24,8 +34,8 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 	if !strings.Contains(joined, "--stats") {
 		t.Error("missing instrumentation flag --stats")
 	}
-	if !strings.Contains(joined, "--info=progress2") {
-		t.Error("missing instrumentation flag --info=progress2")
+	if !strings.Contains(joined, rsyncInfoProgressFlag) {
+		t.Errorf("missing instrumentation flag %s", rsyncInfoProgressFlag)
 	}
 	// Default flags must be present.
 	if !strings.Contains(joined, "-a") {
@@ -239,78 +249,48 @@ func TestBuildTuningFlags_AllFields(t *testing.T) {
 }
 
 func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "--stats", "-v"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --stats, got %q", buf.String())
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for --stats, got %q", logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
-	WarnFlagConflicts(logger, config.EngineRsync, []string{"--info=progress2"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --info=progress2, got %q", buf.String())
+	WarnFlagConflicts(logger, config.EngineRsync, []string{rsyncInfoProgressFlag})
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for %s, got %q", rsyncInfoProgressFlag, logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRclone, []string{"--log-file=/custom/path.log"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --log-file=..., got %q", buf.String())
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for --log-file=..., got %q", logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_NoConflict(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "-v", "-h"})
-	if strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("unexpected conflict warning for safe flags: %q", buf.String())
+	if strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("unexpected conflict warning for safe flags: %q", logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_UnknownEngine_NoWarning(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	// An unrecognized engine must match no instrumentation keys at all,
 	// not silently fall through to rclone's.
 	WarnFlagConflicts(logger, "tarsnap", []string{"--stats", "--log-file=/x"})
-	if strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("unknown engine should produce no conflict warnings, got %q", buf.String())
+	if strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("unknown engine should produce no conflict warnings, got %q", logger.output())
 	}
 }

@@ -53,6 +53,17 @@ func rsyncDefaults() *config.Defaults {
 	return &config.Defaults{Rsync: &config.RsyncDefaults{Flags: []string{"-a"}}}
 }
 
+func newTestFileRunLocker(t *testing.T) *FileRunLocker {
+	t.Helper()
+	locker := NewFileRunLocker()
+	t.Cleanup(func() {
+		if locker.lockFile != nil {
+			_ = locker.lockFile.Close()
+		}
+	})
+	return locker
+}
+
 // runPipeline builds a Runner over cfg with a discard logger and a
 // non-interactive ProgressWriter to io.Discard, runs the full pipeline, and
 // returns the Summary. Pass a unique configPath under t.TempDir() so the
@@ -66,8 +77,22 @@ func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOp
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
+	t.Cleanup(logger.Close)
 	pw := NewProgressWriter(io.Discard, false, false)
-	runner := NewRunner(RunnerConfig{Cfg: cfg, ConfigPath: configPath, Logger: logger, Progress: pw, DryRun: opts.DryRun, LogFile: logFile})
+	runner, err := NewRunner(RunnerConfig{
+		Cfg:           cfg,
+		ConfigPath:    configPath,
+		Logger:        logger,
+		Progress:      pw,
+		Prerequisites: NewSystemPrerequisiteChecker(),
+		Locker:        newTestFileRunLocker(t),
+		Rsync:         NewRsyncExecutor(logger),
+		Rclone:        NewRcloneExecutor(logger, logFile, ""),
+		DryRun:        opts.DryRun,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
 	summary, err := runner.Run(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
@@ -268,7 +293,21 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("creating logger %s: %v", tag, err)
 		}
-		return NewRunner(RunnerConfig{Cfg: cfg, ConfigPath: configPath, Logger: logger, Progress: NewProgressWriter(io.Discard, false, false), LogFile: logFile})
+		t.Cleanup(logger.Close)
+		runner, err := NewRunner(RunnerConfig{
+			Cfg:           cfg,
+			ConfigPath:    configPath,
+			Logger:        logger,
+			Progress:      NewProgressWriter(io.Discard, false, false),
+			Prerequisites: NewSystemPrerequisiteChecker(),
+			Locker:        newTestFileRunLocker(t),
+			Rsync:         NewRsyncExecutor(logger),
+			Rclone:        NewRcloneExecutor(logger, logFile, ""),
+		})
+		if err != nil {
+			t.Fatalf("NewRunner() error = %v", err)
+		}
+		return runner
 	}
 
 	run1 := newRunner("run1")

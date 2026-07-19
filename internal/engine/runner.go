@@ -2,22 +2,16 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
-	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
-	"github.com/jkleinne/shuttle/internal/log"
 )
 
 // RunOptions holds the CLI flags that control a sync run.
@@ -28,56 +22,178 @@ type RunOptions struct {
 	SelectedRemotes []string
 }
 
-// Runner orchestrates jobs: checks prerequisites, acquires a per-config
-// file lock, dispatches jobs in config order, and collects results.
+// RsyncCommandExecutor keeps rsync process I/O outside runner orchestration.
+type RsyncCommandExecutor interface {
+	// Exec runs one pre-built argument list so Runner does not own process I/O.
+	Exec(context.Context, []string, func(string)) ItemResult
+}
+
+// RunnerLogger exposes only the logging behavior required during a run.
+type RunnerLogger interface {
+	WarningLogger
+	// Header keeps noninteractive section boundaries visible to the user.
+	Header(string)
+	// Info reports noninteractive run context without exposing logger storage.
+	Info(string)
+	// Success reports completed boundary checks before job execution begins.
+	Success(string)
+	// Error reports noninteractive failures while preserving Runner's routing choice.
+	Error(string)
+	// Debug records command diagnostics without coupling Runner to verbosity state.
+	Debug(string)
+	// FileHeader keeps section boundaries in the log while interactive output owns the terminal.
+	FileHeader(string)
+	// FileInfo records run context without disturbing interactive terminal presentation.
+	FileInfo(string)
+	// FileWarn records warnings without disturbing interactive terminal presentation.
+	FileWarn(string)
+	// FileError records failures without disturbing interactive terminal presentation.
+	FileError(string)
+	// LogPath keeps command logging and logger storage pointed at one authoritative file.
+	LogPath() string
+}
+
+// RunnerProgress keeps terminal presentation outside runner orchestration.
+type RunnerProgress interface {
+	// Interactive lets Runner route messages away from a terminal owned by live progress.
+	Interactive() bool
+	// SkipJob keeps filtered jobs visible without running their execution boundary.
+	SkipJob(string)
+	// StartJob begins one presentation lifecycle using the job's cancellation context.
+	StartJob(context.Context, string)
+	// ProgressCallback bridges executor updates into the active presentation lifecycle.
+	ProgressCallback() func(string)
+	// FinishJob closes the presentation lifecycle with the executor's result.
+	FinishJob(ItemResult)
+}
+
+// PrerequisiteChecker keeps executable and filter-file probes at a system boundary.
+type PrerequisiteChecker interface {
+	// Check prevents a run from locking or executing when selected dependencies are unavailable.
+	Check(PrerequisiteRequest) error
+}
+
+// RunLocker keeps filesystem locking outside runner orchestration.
+type RunLocker interface {
+	// Acquire prevents concurrent runs from sharing one absolute configuration identity.
+	Acquire(string) error
+}
+
+// RcloneCommandExecutor keeps rclone process and archive-cleanup I/O outside orchestration.
+type RcloneCommandExecutor interface {
+	// Exec runs one pre-built argument list so Runner does not own process I/O.
+	Exec(context.Context, []string, func(string)) ItemResult
+	// CleanupArchives applies retention before a remote run without exposing rclone I/O to Runner.
+	CleanupArchives(context.Context, ArchiveCleanupRequest) error
+}
+
+// Runner orchestrates validated jobs through injected boundary ports.
 type Runner struct {
-	cfg        *config.Config
-	configPath string
-	logger     *log.Logger
-	pw         *ProgressWriter
-	rsync      *RsyncExecutor
-	rclone     *RcloneExecutor
-	dryRun     bool
-	logFile    string
-	lockFile   *os.File // held open to maintain flock; released on process exit
+	cfg           *config.Config
+	configPath    string
+	logger        RunnerLogger
+	progress      RunnerProgress
+	prerequisites PrerequisiteChecker
+	locker        RunLocker
+	rsync         RsyncCommandExecutor
+	rclone        RcloneCommandExecutor
+	dryRun        bool
 }
 
-// RunnerConfig carries the inputs needed to construct a Runner. Grouped into
-// a struct so the constructor stays within the project's argument-count
-// budget and so each call site names the field it sets at the boundary.
+// RunnerConfig names the validated values and six boundary ports consumed by a run.
 type RunnerConfig struct {
-	Cfg            *config.Config
-	ConfigPath     string // absolute path to the config file (used for per-config locking)
-	Logger         *log.Logger
-	Progress       *ProgressWriter // live terminal display; nil yields a discard writer
-	DryRun         bool
-	LogFile        string
-	RclonePassword string // injected into rclone child processes only; empty means none
+	// Cfg supplies validated job definitions while run planning remains unchanged.
+	Cfg *config.Config
+	// ConfigPath provides a stable absolute identity for per-config locking.
+	ConfigPath string
+	// Logger routes run diagnostics and supplies the authoritative absolute log path.
+	Logger RunnerLogger
+	// Progress owns terminal presentation for job lifecycle events.
+	Progress RunnerProgress
+	// Prerequisites validates external tools and filter files before locking.
+	Prerequisites PrerequisiteChecker
+	// Locker prevents concurrent runs of the same absolute config path.
+	Locker RunLocker
+	// Rsync executes pre-built rsync argument lists.
+	Rsync RsyncCommandExecutor
+	// Rclone executes pre-built rclone arguments and archive cleanup requests.
+	Rclone RcloneCommandExecutor
+	// DryRun preserves the current execution mode until run planning owns it.
+	DryRun bool
 }
 
-// NewRunner creates a Runner from rc. If rc.Progress is nil, a non-interactive
-// writer that prints plain status lines to io.Discard is used.
-func NewRunner(rc RunnerConfig) *Runner {
-	pw := rc.Progress
-	if pw == nil {
-		pw = NewProgressWriter(io.Discard, false, false)
+// NewRunner rejects invalid boundary values before any run I/O can begin.
+func NewRunner(rc RunnerConfig) (*Runner, error) {
+	if rc.Cfg == nil {
+		return nil, errors.New("invalid runner config: config is nil")
+	}
+	if rc.ConfigPath == "" {
+		return nil, errors.New("invalid runner config: config path is empty")
+	}
+	if !filepath.IsAbs(rc.ConfigPath) {
+		return nil, fmt.Errorf("invalid runner config: config path %q is not absolute", rc.ConfigPath)
+	}
+	if isNilRunnerPort(rc.Logger) {
+		return nil, errors.New("invalid runner config: logger is nil")
+	}
+	logPath := rc.Logger.LogPath()
+	if logPath == "" {
+		return nil, errors.New("invalid runner config: logger log path is empty")
+	}
+	if !filepath.IsAbs(logPath) {
+		return nil, fmt.Errorf("invalid runner config: logger log path %q is not absolute", logPath)
+	}
+	if isNilRunnerPort(rc.Progress) {
+		return nil, errors.New("invalid runner config: progress is nil")
+	}
+	if isNilRunnerPort(rc.Prerequisites) {
+		return nil, errors.New("invalid runner config: prerequisites is nil")
+	}
+	if isNilRunnerPort(rc.Locker) {
+		return nil, errors.New("invalid runner config: locker is nil")
+	}
+	if isNilRunnerPort(rc.Rsync) {
+		return nil, errors.New("invalid runner config: rsync executor is nil")
+	}
+	if isNilRunnerPort(rc.Rclone) {
+		return nil, errors.New("invalid runner config: rclone executor is nil")
 	}
 	return &Runner{
-		cfg:        rc.Cfg,
-		configPath: rc.ConfigPath,
-		logger:     rc.Logger,
-		pw:         pw,
-		rsync:      NewRsyncExecutor(rc.Logger),
-		rclone:     NewRcloneExecutor(rc.Logger, rc.LogFile, rc.RclonePassword),
-		dryRun:     rc.DryRun,
-		logFile:    rc.LogFile,
+		cfg:           rc.Cfg,
+		configPath:    rc.ConfigPath,
+		logger:        rc.Logger,
+		progress:      rc.Progress,
+		prerequisites: rc.Prerequisites,
+		locker:        rc.Locker,
+		rsync:         rc.Rsync,
+		rclone:        rc.Rclone,
+		dryRun:        rc.DryRun,
+	}, nil
+}
+
+func isNilRunnerPort(port any) bool {
+	if port == nil {
+		return true
+	}
+	portValue := reflect.ValueOf(port)
+	switch portValue.Kind() {
+	case reflect.Chan,
+		reflect.Func,
+		reflect.Interface,
+		reflect.Map,
+		reflect.Pointer,
+		reflect.Slice,
+		reflect.UnsafePointer:
+		return portValue.IsNil()
+	default:
+		return false
 	}
 }
 
 // logHeader writes a section header. In interactive mode, output goes to the
 // log file only so it doesn't interleave with the live spinner.
 func (r *Runner) logHeader(msg string) {
-	if r.pw.Interactive() {
+	if r.progress.Interactive() {
 		r.logger.FileHeader(msg)
 	} else {
 		r.logger.Header(msg)
@@ -86,7 +202,7 @@ func (r *Runner) logHeader(msg string) {
 
 // logInfo writes an informational message, routed like logHeader.
 func (r *Runner) logInfo(msg string) {
-	if r.pw.Interactive() {
+	if r.progress.Interactive() {
 		r.logger.FileInfo(msg)
 	} else {
 		r.logger.Info(msg)
@@ -95,7 +211,7 @@ func (r *Runner) logInfo(msg string) {
 
 // logError writes an error message, routed like logHeader.
 func (r *Runner) logError(msg string) {
-	if r.pw.Interactive() {
+	if r.progress.Interactive() {
 		r.logger.FileError(msg)
 	} else {
 		r.logger.Error(msg)
@@ -106,7 +222,7 @@ func (r *Runner) logError(msg string) {
 // with the live spinner in interactive mode. The warning still lands in the
 // log file; stderr output is skipped while the spinner owns the TTY.
 func (r *Runner) logWarn(msg string) {
-	if r.pw.Interactive() {
+	if r.progress.Interactive() {
 		r.logger.FileWarn(msg)
 	} else {
 		r.logger.Warn(msg)
@@ -136,7 +252,7 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 	if err := r.checkPrerequisites(opts); err != nil {
 		return Summary{}, fmt.Errorf("prerequisites: %w", err)
 	}
-	if err := r.acquireLock(); err != nil {
+	if err := r.locker.Acquire(r.configPath); err != nil {
 		return Summary{}, err
 	}
 
@@ -162,13 +278,13 @@ func (r *Runner) Run(ctx context.Context, opts RunOptions) (Summary, error) {
 // result when the user's --remote filter excludes every configured remote.
 func (r *Runner) dispatchJob(ctx context.Context, job config.Job, opts RunOptions, timestamp string) []JobResult {
 	if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
-		r.pw.SkipJob(job.Name)
+		r.progress.SkipJob(job.Name)
 		return []JobResult{skippedJobResult(job.Name)}
 	}
 
 	switch job.Engine {
 	case config.EngineRsync:
-		r.logHeader(fmt.Sprintf("Syncing: %s", job.Name))
+		r.logHeader("Syncing: " + job.Name)
 		return []JobResult{r.runRsyncJob(ctx, job)}
 
 	case config.EngineRclone:
@@ -190,20 +306,29 @@ func (r *Runner) dispatchRclone(ctx context.Context, job config.Job, opts RunOpt
 
 	remotes := r.targetRemotes(job.Remotes, opts.SelectedRemotes)
 	if len(remotes) == 0 && len(opts.SelectedRemotes) > 0 {
-		r.pw.SkipJob(job.Name)
+		r.progress.SkipJob(job.Name)
 		return []JobResult{skippedJobResult(job.Name)}
 	}
 
 	results := make([]JobResult, 0, len(remotes))
 	for _, remote := range remotes {
-		r.logHeader(fmt.Sprintf("Cloud upload: %s → %s [mode: %s]", job.Name, remote, job.Mode))
+		r.logHeader("Cloud upload: " + job.Name + " → " + remote + " [mode: " + job.Mode + "]")
 		// CleanupArchives deliberately uses the parent ctx, not the per-invocation
 		// jobCtx created inside runRcloneJob: a slow housekeeping pass shouldn't
 		// inherit the job's max_runtime and cause the cleanup to time out.
-		if err := r.rclone.CleanupArchives(ctx, remote, job.BackupPath, job.BackupRetentionDays, r.dryRun); err != nil {
-			r.logWarn(fmt.Sprintf("archive cleanup for %s: %v", remote, err))
+		if err := r.rclone.CleanupArchives(ctx, ArchiveCleanupRequest{
+			RemoteName:    remote,
+			BackupPath:    job.BackupPath,
+			RetentionDays: job.BackupRetentionDays,
+			DryRun:        r.dryRun,
+		}); err != nil {
+			r.logWarn("archive cleanup for " + remote + ": " + err.Error())
 		}
-		results = append(results, r.runRcloneJob(ctx, job, remote, timestamp))
+		results = append(results, r.runRcloneJob(ctx, rcloneJobRequest{
+			job:          job,
+			remoteName:   remote,
+			runTimestamp: timestamp,
+		}))
 	}
 	return results
 }
@@ -284,29 +409,29 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		if err != nil {
 			label := job.Name
 			if multiSource {
-				label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(source))
+				label = job.Name + " · " + filepath.Base(source)
 			}
 			item := ItemResult{Name: filepath.Base(source)}
 			if job.Optional {
 				r.logWarn("Source not present (optional, skipping): " + source)
 				item.Status = StatusOptionalMissing
 			} else {
-				r.logError(fmt.Sprintf("Source not found: %s: %v", source, err))
+				r.logError("Source not found: " + source + ": " + err.Error())
 				item.Status = StatusNotFound
 			}
-			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(item)
+			r.progress.StartJob(ctx, label)
+			r.progress.FinishJob(item)
 			items = append(items, item)
 			continue
 		}
 
 		label := job.Name
 		if multiSource {
-			label = fmt.Sprintf("%s · %s", job.Name, filepath.Base(resolved))
+			label = job.Name + " · " + filepath.Base(resolved)
 		}
 
-		r.logInfo(fmt.Sprintf("Source: %s", resolved))
-		r.logInfo(fmt.Sprintf("Destination: %s", job.Destination))
+		r.logInfo("Source: " + resolved)
+		r.logInfo("Destination: " + job.Destination)
 
 		args := BuildRsyncArgs(RsyncArgsRequest{
 			Defaults:    defaults,
@@ -315,7 +440,7 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 			Destination: job.Destination,
 			IsDeleteDir: job.Delete && isDir,
 			DryRun:      r.dryRun,
-			LogFile:     r.logFile,
+			LogFile:     r.logger.LogPath(),
 		})
 		r.logger.Debug(formatExec("rsync", args))
 
@@ -326,105 +451,173 @@ func (r *Runner) runRsyncJob(ctx context.Context, job config.Job) JobResult {
 		maxRuntime, _ := job.MaxRuntimeDuration()
 		jobCtx, cancel := jobContext(ctx, maxRuntime)
 
-		r.pw.StartJob(jobCtx, label)
-		result := r.rsync.Exec(jobCtx, args, r.pw.ProgressCallback())
+		r.progress.StartJob(jobCtx, label)
+		result := r.rsync.Exec(jobCtx, args, r.progress.ProgressCallback())
 		cancel()
-		r.pw.FinishJob(result)
+		r.progress.FinishJob(result)
 		items = append(items, result)
 	}
 	return JobResult{Name: job.Name, Items: items}
 }
 
-// runRcloneJob runs rclone for a single source against a single remote.
-// WarnFlagConflicts is called by the caller (Run) once per job, not here.
-func (r *Runner) runRcloneJob(ctx context.Context, job config.Job, remoteName, timestamp string) JobResult {
-	var rcloneDefaults *config.RcloneDefaults
-	if r.cfg.Defaults != nil {
-		rcloneDefaults = r.cfg.Defaults.Rclone
+type rcloneSource struct {
+	value       string
+	isDirectory bool
+	isRemote    bool
+}
+
+type rcloneInvocation struct {
+	source          rcloneSource
+	sourceArgument  string
+	destination     string
+	destinationName string
+}
+
+type rcloneJobRequest struct {
+	job          config.Job
+	remoteName   string
+	runTimestamp string
+}
+
+type rcloneArgumentsRequest struct {
+	defaults     *config.RcloneDefaults
+	job          config.Job
+	invocation   rcloneInvocation
+	remoteName   string
+	runTimestamp string
+	dryRun       bool
+	logPath      string
+}
+
+func resolveRcloneSource(source string) (rcloneSource, error) {
+	if isRcloneRemote(source) {
+		return rcloneSource{value: source, isDirectory: true, isRemote: true}, nil
 	}
-
-	label := fmt.Sprintf("%s → %s", job.Name, remoteName)
-	source := job.Source
-	isRemote := isRcloneRemote(source)
-
-	var isDir bool
-	if isRemote {
-		isDir = true
-	} else {
-		_, isDirStat, err := statPath(source)
-		if err != nil {
-			item := ItemResult{Name: filepath.Base(source)}
-			if job.Optional {
-				r.logWarn("Source not present (optional, skipping): " + source)
-				item.Status = StatusOptionalMissing
-			} else {
-				r.logError(fmt.Sprintf("Skipping %s: %v", source, err))
-				item.Status = StatusNotFound
-			}
-			r.pw.StartJob(ctx, label)
-			r.pw.FinishJob(item)
-			return JobResult{
-				Name:   job.Name,
-				Remote: remoteName,
-				Items:  []ItemResult{item},
-			}
-		}
-		isDir = isDirStat
+	resolved, isDirectory, err := statPath(source)
+	if err != nil {
+		return rcloneSource{}, err
 	}
+	return rcloneSource{value: resolved, isDirectory: isDirectory}, nil
+}
 
-	destName := rcloneDestName(job.Destination, source, isRemote)
+func prepareRcloneInvocation(
+	source rcloneSource,
+	jobDestination string,
+	remoteName string,
+) rcloneInvocation {
+	destinationName := rcloneDestName(jobDestination, source.value)
 
 	var destination string
 	switch {
-	case destName == "":
-		destination = fmt.Sprintf("%s:", remoteName)
-	case isDir || isRemote:
-		destination = fmt.Sprintf("%s:%s/", remoteName, destName)
+	case destinationName == "":
+		destination = remoteName + ":"
+	case source.isDirectory || source.isRemote:
+		destination = remoteName + ":" + destinationName + "/"
 	default:
-		destination = fmt.Sprintf("%s:%s", remoteName, destName)
+		destination = remoteName + ":" + destinationName
 	}
 
-	if !isRemote && isDir && !strings.HasSuffix(source, "/") {
-		source += "/"
+	sourceArgument := source.value
+	if !source.isRemote && source.isDirectory && !strings.HasSuffix(sourceArgument, "/") {
+		sourceArgument += "/"
 	}
+	return rcloneInvocation{
+		source:          source,
+		sourceArgument:  sourceArgument,
+		destination:     destination,
+		destinationName: destinationName,
+	}
+}
 
-	r.logInfo(fmt.Sprintf("Source: %s", source))
-	r.logInfo(fmt.Sprintf("Destination: %s", destination))
-
-	subcommand, backupDirArg := selectMode(modeRequest{
-		Mode:         job.Mode,
-		Destination:  destination,
-		RemoteName:   remoteName,
-		BackupPath:   job.BackupPath,
-		RunTimestamp: timestamp,
-		IsDir:        isDir,
+func (r *Runner) buildRcloneJobArguments(request rcloneArgumentsRequest) []string {
+	subcommand, backupDirectoryArgument := selectMode(modeRequest{
+		Mode:         request.job.Mode,
+		Destination:  request.invocation.destination,
+		RemoteName:   request.remoteName,
+		BackupPath:   request.job.BackupPath,
+		RunTimestamp: request.runTimestamp,
+		IsDir:        request.invocation.source.isDirectory,
 	}, r.logger)
-	args := BuildRcloneArgs(RcloneArgsRequest{
+	return BuildRcloneArgs(RcloneArgsRequest{
 		Subcommand:   subcommand,
-		Defaults:     rcloneDefaults,
-		Job:          job,
-		Source:       source,
-		Destination:  destination,
-		DryRun:       r.dryRun,
-		LogFile:      r.logFile,
-		BackupDirArg: backupDirArg,
+		Defaults:     request.defaults,
+		Job:          request.job,
+		Source:       request.invocation.sourceArgument,
+		Destination:  request.invocation.destination,
+		DryRun:       request.dryRun,
+		LogFile:      request.logPath,
+		BackupDirArg: backupDirectoryArgument,
+	})
+}
+
+func (r *Runner) missingRcloneSourceResult(
+	ctx context.Context,
+	request rcloneJobRequest,
+	sourceError error,
+) JobResult {
+	item := ItemResult{Name: filepath.Base(request.job.Source)}
+	if request.job.Optional {
+		r.logWarn("Source not present (optional, skipping): " + request.job.Source)
+		item.Status = StatusOptionalMissing
+	} else {
+		r.logError("Skipping " + request.job.Source + ": " + sourceError.Error())
+		item.Status = StatusNotFound
+	}
+	r.progress.StartJob(ctx, request.job.Name+" → "+request.remoteName)
+	r.progress.FinishJob(item)
+	return JobResult{
+		Name:   request.job.Name,
+		Remote: request.remoteName,
+		Items:  []ItemResult{item},
+	}
+}
+
+// runRcloneJob runs rclone for one request-shaped source and remote invocation.
+func (r *Runner) runRcloneJob(ctx context.Context, request rcloneJobRequest) JobResult {
+	var defaults *config.RcloneDefaults
+	if r.cfg.Defaults != nil {
+		defaults = r.cfg.Defaults.Rclone
+	}
+
+	label := request.job.Name + " → " + request.remoteName
+	source, err := resolveRcloneSource(request.job.Source)
+	if err != nil {
+		return r.missingRcloneSourceResult(ctx, request, err)
+	}
+	invocation := prepareRcloneInvocation(source, request.job.Destination, request.remoteName)
+
+	r.logInfo("Source: " + invocation.sourceArgument)
+	r.logInfo("Destination: " + invocation.destination)
+
+	args := r.buildRcloneJobArguments(rcloneArgumentsRequest{
+		defaults:     defaults,
+		job:          request.job,
+		invocation:   invocation,
+		remoteName:   request.remoteName,
+		runTimestamp: request.runTimestamp,
+		dryRun:       r.dryRun,
+		logPath:      r.logger.LogPath(),
 	})
 	r.logger.Debug(formatExec("rclone", args))
 
 	// See the rsync branch for why the error is discarded; same reasoning applies.
-	maxRuntime, _ := job.MaxRuntimeDuration()
+	maxRuntime, _ := request.job.MaxRuntimeDuration()
 	jobCtx, cancel := jobContext(ctx, maxRuntime)
 	defer cancel()
 
-	r.pw.StartJob(jobCtx, label)
-	result := r.rclone.Exec(jobCtx, args, r.pw.ProgressCallback())
-	result.Name = destName
-	if destName == "" {
+	r.progress.StartJob(jobCtx, label)
+	result := r.rclone.Exec(jobCtx, args, r.progress.ProgressCallback())
+	result.Name = invocation.destinationName
+	if invocation.destinationName == "" {
 		result.Name = "(prefix root)"
 	}
-	r.pw.FinishJob(result)
+	r.progress.FinishJob(result)
 
-	return JobResult{Name: job.Name, Remote: remoteName, Items: []ItemResult{result}}
+	return JobResult{
+		Name:   request.job.Name,
+		Remote: request.remoteName,
+		Items:  []ItemResult{result},
+	}
 }
 
 // collectRsyncUserFlags gathers all user-provided flags for rsync conflict detection.
@@ -447,12 +640,11 @@ func collectRcloneUserFlags(defaults *config.RcloneDefaults, job config.Job) []s
 	return flags
 }
 
-// checkPrerequisites validates that required tools and filter files exist.
-// Each check is conditional on whether the corresponding job type will
-// actually run.
+// checkPrerequisites delegates selected tool and filter-file probes to the system boundary.
 func (r *Runner) checkPrerequisites(opts RunOptions) error {
-	needsRsync := false
-	needsRclone := false
+	request := PrerequisiteRequest{
+		FilterFiles: r.collectFilterFiles(opts),
+	}
 
 	for _, job := range r.cfg.Jobs {
 		if !shouldRunJob(job.Name, opts.SkipJobs, opts.OnlyJobs) {
@@ -460,30 +652,14 @@ func (r *Runner) checkPrerequisites(opts RunOptions) error {
 		}
 		switch job.Engine {
 		case config.EngineRsync:
-			needsRsync = true
+			request.NeedsRsync = true
 		case config.EngineRclone:
-			needsRclone = true
+			request.NeedsRclone = true
 		}
 	}
 
-	if needsRsync {
-		if _, err := exec.LookPath("rsync"); err != nil {
-			return fmt.Errorf("rsync not found on PATH")
-		}
-	}
-
-	if needsRclone {
-		if _, err := exec.LookPath("rclone"); err != nil {
-			return fmt.Errorf("rclone not found on PATH")
-		}
-	}
-
-	// Check filter files referenced by active rclone jobs.
-	filterFiles := r.collectFilterFiles(opts)
-	for _, ff := range filterFiles {
-		if _, err := os.Stat(ff); err != nil {
-			return fmt.Errorf("rclone filter file not found: %s", ff)
-		}
+	if err := r.prerequisites.Check(request); err != nil {
+		return err
 	}
 
 	r.logger.Success("All prerequisites met.")
@@ -497,88 +673,6 @@ func (r *Runner) collectFilterFiles(opts RunOptions) []string {
 	return r.cfg.RcloneFilterFiles(func(j config.Job) bool {
 		return shouldRunJob(j.Name, opts.SkipJobs, opts.OnlyJobs)
 	})
-}
-
-// lockDirPerm is the owner-only mode for the per-user lock directory: no group
-// or other access, so a different local user cannot read or plant entries in it.
-const lockDirPerm os.FileMode = 0o700
-
-// lockDir returns the directory for the per-config lock file. It prefers
-// XDG_RUNTIME_DIR; absent that, a per-user "shuttle-<uid>" subdirectory under
-// os.TempDir(). Both paths are run through ensureSecureDir, which creates a
-// missing directory mode 0700 and fails closed on a symlink, non-directory,
-// group/other-accessible, or foreign-owned one. XDG_RUNTIME_DIR is per-user
-// mode 0700 by the XDG spec, but it is an environment value, so it is verified
-// to the same bar rather than trusted blind; ensureSecureDir is a no-op on an
-// already-valid directory.
-func lockDir() (string, error) {
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		dir = filepath.Join(os.TempDir(), fmt.Sprintf("shuttle-%d", os.Getuid()))
-	}
-	if err := ensureSecureDir(dir); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
-// ensureSecureDir creates dir mode 0700 if absent, or verifies an existing dir
-// is a real directory (not a symlink), owned by the current user, with no
-// group/other access. It fails closed: an insecure pre-existing path is an
-// error, never silently reused.
-func ensureSecureDir(dir string) error {
-	fi, err := os.Lstat(dir) // Lstat so a planted symlink is detected, not followed
-	if errors.Is(err, fs.ErrNotExist) {
-		return os.Mkdir(dir, lockDirPerm) // parent TempDir already exists; create the leaf only
-	}
-	if err != nil {
-		return fmt.Errorf("checking lock dir %s: %w", dir, err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("lock dir %s is a symlink", dir)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("lock dir %s is not a directory", dir)
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("lock dir %s is group/other-accessible (%o)", dir, fi.Mode().Perm())
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("lock dir %s not owned by current user", dir)
-	}
-	return nil
-}
-
-// acquireLock obtains an exclusive, non-blocking file lock via syscall.Flock.
-// The lock file lives in a per-user runtime directory (see lockDir) and is
-// opened O_NOFOLLOW so a symlink planted at the path cannot redirect the open.
-func (r *Runner) acquireLock() error {
-	lockPath, err := r.lockFilePath()
-	if err != nil {
-		return fmt.Errorf("resolving lock path: %w", err)
-	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return fmt.Errorf("opening lock file: %w", err)
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("another instance is already running (lock: %s)", lockPath)
-	}
-	r.lockFile = f
-	return nil
-}
-
-// lockFilePath returns <lockDir>/shuttle-<hash>.lock where hash is the first
-// 8 hex characters of SHA-256 of the absolute config file path, keeping the
-// lock per-config while the directory is per-user.
-func (r *Runner) lockFilePath() (string, error) {
-	dir, err := lockDir()
-	if err != nil {
-		return "", err
-	}
-	h := sha256.Sum256([]byte(r.configPath))
-	return filepath.Join(dir, fmt.Sprintf("shuttle-%x.lock", h[:4])), nil
 }
 
 // targetRemotes returns the intersection of the job's remotes and the
@@ -605,7 +699,7 @@ func (r *Runner) targetRemotes(jobRemotes, selected []string) []string {
 // is unknown.
 func ValidateJobNames(skip, only, jobNames []string) error {
 	if len(skip) > 0 && len(only) > 0 {
-		return fmt.Errorf("--skip and --only are mutually exclusive")
+		return errors.New("--skip and --only are mutually exclusive")
 	}
 
 	valid := make(map[string]bool, len(jobNames))

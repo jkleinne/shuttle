@@ -569,6 +569,58 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
+func TestResolveConfigPath_DefaultRelativeXDG_ReturnsAbsolute(t *testing.T) {
+	t.Setenv(envConfigPath, "")
+	t.Setenv("XDG_CONFIG_HOME", "relative-config")
+	want, err := filepath.Abs(filepath.Join("relative-config", "shuttle", "config.toml"))
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+
+	got, explicit, err := resolveConfigPath("")
+
+	if err != nil {
+		t.Fatalf("resolveConfigPath() error = %v", err)
+	}
+	if explicit {
+		t.Error("explicit = true, want false for default path")
+	}
+	if got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+}
+
+func TestLogDirectory_RelativeXDG_ReturnsAbsolute(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "relative-state")
+	want, err := filepath.Abs(filepath.Join("relative-state", "shuttle", "logs"))
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+
+	got, err := logDirectory()
+
+	if err != nil {
+		t.Fatalf("logDirectory() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("logDirectory() = %q, want %q", got, want)
+	}
+}
+
+func TestLogDirectory_MissingHome_ReturnsError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+
+	got, err := logDirectory()
+
+	if err == nil {
+		t.Fatalf("logDirectory() = (%q, nil), want home lookup error", got)
+	}
+	if !strings.Contains(err.Error(), "home") {
+		t.Errorf("error = %q, want it to mention home", err)
+	}
+}
+
 func TestCLI_ConfigFlag_ValidPath_Succeeds(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")

@@ -257,9 +257,13 @@ func resolveConfigPath(flagValue string) (path string, explicit bool, err error)
 	if raw == "" {
 		p, pathErr := config.ConfigPath()
 		if pathErr != nil {
-			return "", false, pathErr
+			return "", false, fmt.Errorf("resolving default config path: %w", pathErr)
 		}
-		return p, false, nil
+		absolutePath, absoluteError := filepath.Abs(p)
+		if absoluteError != nil {
+			return "", false, fmt.Errorf("resolving default config path %q: %w", p, absoluteError)
+		}
+		return absolutePath, false, nil
 	}
 	expanded, expErr := expandHome(raw)
 	if expErr != nil {
@@ -349,7 +353,10 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 		return err
 	}
 
-	logDir := logDirectory()
+	logDir, err := logDirectory()
+	if err != nil {
+		return err
+	}
 	stdoutIsTTY := term.IsTerminal(int(os.Stdout.Fd()))
 	noColor := os.Getenv("NO_COLOR") != ""
 	useColor := resolveColor(cli.ColorMode, stdoutIsTTY, noColor)
@@ -380,7 +387,7 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 		logger.Info(fmt.Sprintf("pruned %d old log file(s)", pruneDeleted))
 	}
 
-	rclonePass := resolveRclonePassword(logger)
+	rclonePassword := resolveRclonePassword(logger)
 
 	// In quiet mode, the per-job spinner and status lines are suppressed so
 	// the terminal stays silent unless something fails.
@@ -392,15 +399,24 @@ func executeRun(ctx context.Context, cli cliFlags) error {
 	}
 
 	pw := engine.NewProgressWriter(progressOut, progressInteractive, useColor)
-	runner := engine.NewRunner(engine.RunnerConfig{
-		Cfg:            cfg,
-		ConfigPath:     configPath,
-		Logger:         logger,
-		Progress:       pw,
-		DryRun:         opts.DryRun,
-		LogFile:        logPath,
-		RclonePassword: rclonePass,
+	rsyncExecutor := engine.NewRsyncExecutor(logger)
+	rcloneExecutor := engine.NewRcloneExecutor(logger, logPath, rclonePassword)
+	prerequisiteChecker := engine.NewSystemPrerequisiteChecker()
+	runLocker := engine.NewFileRunLocker()
+	runner, err := engine.NewRunner(engine.RunnerConfig{
+		Cfg:           cfg,
+		ConfigPath:    configPath,
+		Logger:        logger,
+		Progress:      pw,
+		Prerequisites: prerequisiteChecker,
+		Locker:        runLocker,
+		Rsync:         rsyncExecutor,
+		Rclone:        rcloneExecutor,
+		DryRun:        opts.DryRun,
 	})
+	if err != nil {
+		return fmt.Errorf("creating runner: %w", err)
+	}
 	summary, err := runner.Run(ctx, opts)
 	if err != nil {
 		return err
@@ -466,13 +482,20 @@ func resolveRclonePassword(logger *log.Logger) string {
 	return string(pass)
 }
 
-// logDirectory returns the path for log files, respecting XDG_STATE_HOME.
-// Falls back to ~/.local/state when the env var is not set.
-func logDirectory() string {
+// logDirectory returns an absolute log path while preserving home lookup failures.
+func logDirectory() (string, error) {
 	dir := os.Getenv("XDG_STATE_HOME")
 	if dir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving home directory for logs: %w", err)
+		}
 		dir = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "shuttle", "logs")
+	logDir := filepath.Join(dir, "shuttle", "logs")
+	absolutePath, err := filepath.Abs(logDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving log directory %q: %w", logDir, err)
+	}
+	return absolutePath, nil
 }

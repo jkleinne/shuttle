@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
@@ -275,6 +276,57 @@ func newRcloneTestExecutor(t *testing.T) (*RcloneExecutor, string) {
 	return NewRcloneExecutor(logger, logPath, ""), logPath
 }
 
+func TestBeginExecutionTiming_CountsExistingLogBeforeStartingClock(t *testing.T) {
+	executor, logPath := newRcloneTestExecutor(t)
+	if err := os.WriteFile(logPath, []byte("existing line\n"), 0o600); err != nil {
+		t.Fatalf("writing existing log: %v", err)
+	}
+	startedAt := time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	executor.now = func() time.Time {
+		if err := os.WriteFile(logPath, []byte("existing line\nclock line\n"), 0o600); err != nil {
+			t.Fatalf("writing clock log: %v", err)
+		}
+		return startedAt
+	}
+
+	timing := executor.beginExecutionTiming()
+
+	if timing.logStartLine != 1 {
+		t.Errorf("log start line = %d, want 1 counted before the clock starts", timing.logStartLine)
+	}
+	if !timing.startedAt.Equal(startedAt) {
+		t.Errorf("started at = %v, want %v", timing.startedAt, startedAt)
+	}
+}
+
+func TestPrepareExecution_StartsClockBeforeCommandConstruction(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatalf("finding true executable: %v", err)
+	}
+	commandDirectory := t.TempDir()
+	if err := os.Symlink(truePath, filepath.Join(commandDirectory, rcloneCommandName)); err != nil {
+		t.Fatalf("linking test rclone executable: %v", err)
+	}
+	t.Setenv("PATH", commandDirectory)
+	pathWithoutRclone := t.TempDir()
+	executor, _ := newRcloneTestExecutor(t)
+	executor.now = func() time.Time {
+		if err := os.Setenv("PATH", pathWithoutRclone); err != nil {
+			t.Fatalf("removing rclone from PATH: %v", err)
+		}
+		return time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	}
+
+	execution, failure := executor.prepareExecution(context.Background(), []string{"version"})
+
+	if failure == nil {
+		progressDone := executor.scanExecutionProgress(execution, nil)
+		_ = executor.waitForExecution(context.Background(), execution, progressDone)
+		t.Fatal("prepareExecution() started a command constructed before the clock began")
+	}
+}
+
 func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
 	skipIfNoRclone(t)
 	src := t.TempDir()
@@ -397,7 +449,9 @@ func TestRcloneExec_MissingSource_Fails(t *testing.T) {
 
 func TestCleanupArchives_DryRun_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 30, true)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", BackupPath: "/some/path", RetentionDays: 30, DryRun: true,
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -405,7 +459,9 @@ func TestCleanupArchives_DryRun_Skips(t *testing.T) {
 
 func TestCleanupArchives_EmptyBackupPath_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "", 30, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", RetentionDays: 30,
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -413,9 +469,50 @@ func TestCleanupArchives_EmptyBackupPath_Skips(t *testing.T) {
 
 func TestCleanupArchives_ZeroRetention_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 0, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", BackupPath: "/some/path",
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestPurgeExpiredArchiveDirectories_PurgesBeforeLaterScanError(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	const (
+		expiredDirectory = "2020-01-01_000000"
+		archiveRoot      = "remote:archives"
+	)
+	listing := strings.NewReader(
+		"-1 2020-01-01 00:00:00.000000000 " + expiredDirectory + "\n" +
+			strings.Repeat("x", bufio.MaxScanTokenSize+1),
+	)
+	var purgedTargets []string
+
+	err := executor.purgeExpiredArchiveDirectories(context.Background(), archivePurgeRequest{
+		plan: archiveCleanupPlan{
+			remoteName:  "remote",
+			archiveRoot: archiveRoot,
+			cutoff:      "2026-05-10",
+		},
+		listing: listing,
+		purge: func(_ context.Context, target string) error {
+			purgedTargets = append(purgedTargets, target)
+			return nil
+		},
+	})
+
+	if err == nil {
+		t.Fatal("purgeExpiredArchiveDirectories() = nil, want later scan error")
+	}
+	if !strings.Contains(err.Error(), "scanning archive listing for "+archiveRoot) {
+		t.Errorf("error = %q, want archive listing context", err)
+	}
+	if len(purgedTargets) != 1 {
+		t.Fatalf("purged targets = %v, want one purge before the scan error", purgedTargets)
+	}
+	if want := archiveRoot + "/" + expiredDirectory; purgedTargets[0] != want {
+		t.Errorf("purged target = %q, want %q", purgedTargets[0], want)
 	}
 }
 
@@ -457,7 +554,9 @@ func TestCleanupArchives_PurgesExpired(t *testing.T) {
 		t.Fatalf("writing archive file: %v", err)
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
@@ -480,7 +579,9 @@ func TestCleanupArchives_KeepsRecent(t *testing.T) {
 		t.Fatalf("writing archive file: %v", err)
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
@@ -496,7 +597,9 @@ func TestCleanupArchives_ListingFailure_ReturnsError(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
 	// "nosuchremote" is not defined in the temp rclone config, so lsd fails
 	// with a non-3 exit code: a real configuration problem, not "no archives".
-	err := executor.CleanupArchives(context.Background(), "nosuchremote", "/tmp/whatever", 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "nosuchremote", BackupPath: "/tmp/whatever", RetentionDays: 7,
+	})
 	if err == nil {
 		t.Fatal("CleanupArchives = nil, want error for undefined remote")
 	}
@@ -539,7 +642,9 @@ func TestCleanupArchives_CanceledContext_ReturnsError(t *testing.T) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	cancelCtx()
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(ctx, "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(ctx, ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err == nil {
 		t.Fatal("CleanupArchives = nil, want error for canceled context")
 	}
@@ -554,7 +659,9 @@ func TestCleanupArchives_MissingBackupRoot_NoError(t *testing.T) {
 	defer cleanup()
 	executor, _ := newRcloneTestExecutor(t)
 	missing := filepath.Join(t.TempDir(), "never-created")
-	if err := executor.CleanupArchives(context.Background(), "testlocal", missing, 7, false); err != nil {
+	if err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: missing, RetentionDays: 7,
+	}); err != nil {
 		t.Fatalf("CleanupArchives = %v, want nil for missing backup root (rclone exit 3)", err)
 	}
 }
@@ -575,7 +682,9 @@ func TestCleanupArchives_UnrecognizedAndInvalidDirs_NeverPurged(t *testing.T) {
 		}
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	if err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false); err != nil {
+	if err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	}); err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
 	for _, name := range keep {

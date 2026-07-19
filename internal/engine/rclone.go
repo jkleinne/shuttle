@@ -11,12 +11,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
 )
+
+const rcloneCommandName = "rclone"
 
 // RcloneExecutor wraps rclone execution via os/exec. It receives pre-assembled
 // argument lists from the runner (built by BuildRcloneArgs) and handles command
@@ -25,13 +26,37 @@ type RcloneExecutor struct {
 	logger     *log.Logger
 	logFile    string
 	configPass string // rclone config password; injected per-command, empty means none
+	now        func() time.Time
+}
+
+// ArchiveCleanupRequest carries the values for one remote archive cleanup operation.
+type ArchiveCleanupRequest struct {
+	// RemoteName keeps retention mutations scoped to the same configured remote as the job.
+	RemoteName string
+	// BackupPath keeps cleanup below the job's configured archive root.
+	BackupPath string
+	// RetentionDays makes purge eligibility explicit at the process boundary.
+	RetentionDays int
+	// DryRun prevents retention checks from mutating remote state during previews.
+	DryRun bool
+}
+
+// InformationLogger lets mode selection report fallback behavior without owning logger storage.
+type InformationLogger interface {
+	// Info surfaces mode fallbacks without coupling selection logic to a concrete logger.
+	Info(string)
 }
 
 // NewRcloneExecutor returns a configured RcloneExecutor. logFile is the shared
 // log file used for stats parsing; configPass, when non-empty, is injected as
 // RCLONE_CONFIG_PASS into each rclone command's environment (and nowhere else).
 func NewRcloneExecutor(logger *log.Logger, logFile, configPass string) *RcloneExecutor {
-	return &RcloneExecutor{logger: logger, logFile: logFile, configPass: configPass}
+	return &RcloneExecutor{
+		logger:     logger,
+		logFile:    logFile,
+		configPass: configPass,
+		now:        time.Now,
+	}
 }
 
 // rcloneProgressTracker extracts transfer progress from rclone -P stdout.
@@ -96,6 +121,8 @@ func scanRcloneProgress(r io.Reader, onProgress func(string)) error {
 // splitOnCROrLF is a bufio.SplitFunc that returns tokens delimited by either
 // \r or \n. Used for rclone -P output, which mixes \n-terminated log lines
 // with \r-terminated in-place progress updates.
+//
+//nolint:revive // bufio.SplitFunc requires the atEOF boolean parameter.
 func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
@@ -117,66 +144,125 @@ func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err erro
 // the no-password case and a user-exported RCLONE_CONFIG_PASS). Callers choose
 // their own execution method on the returned command.
 func (e *RcloneExecutor) rcloneCommand(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "rclone", args...)
+	cmd := exec.CommandContext(ctx, rcloneCommandName, args...)
 	if e.configPass != "" {
 		cmd.Env = append(os.Environ(), "RCLONE_CONFIG_PASS="+e.configPass)
 	}
 	return cmd
 }
 
-// Exec runs rclone with the given pre-assembled argument list.
-// Stdout is piped to a goroutine that parses -P progress output. Stats are
-// parsed from the log file section written during this call.
+// Exec keeps rclone process I/O behind the executor by running a pre-assembled
+// argument list, forwarding progress, and parsing only this call's log section.
 func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
-	// Display name from second-to-last arg (source).
+	execution, failure := e.prepareExecution(ctx, args)
+	if failure != nil {
+		return *failure
+	}
+	progressDone := e.scanExecutionProgress(execution, onProgress)
+	return e.waitForExecution(ctx, execution, progressDone)
+}
+
+type rcloneExecution struct {
+	command      *exec.Cmd
+	stdout       io.ReadCloser
+	stderr       *bytes.Buffer
+	displayName  string
+	subcommand   string
+	logStartLine int
+	startedAt    time.Time
+}
+
+type rcloneExecutionTiming struct {
+	logStartLine int
+	startedAt    time.Time
+}
+
+func (e *RcloneExecutor) beginExecutionTiming() rcloneExecutionTiming {
+	logStartLine := 0
+	if e.logFile != "" {
+		logStartLine = countLines(e.logFile)
+	}
+	return rcloneExecutionTiming{
+		logStartLine: logStartLine,
+		startedAt:    e.now(),
+	}
+}
+
+func (e *RcloneExecutor) prepareExecution(ctx context.Context, args []string) (rcloneExecution, *ItemResult) {
 	source := ""
 	if len(args) >= 2 {
 		source = args[len(args)-2]
 	}
 	displayName := filepath.Base(strings.TrimRight(source, "/"))
-
-	logStartLine := 0
-	if e.logFile != "" {
-		logStartLine = countLines(e.logFile)
+	subcommand := rcloneCommandName
+	if len(args) > 0 {
+		subcommand += " " + args[0]
 	}
 
-	start := time.Now()
-
-	cmd := e.rcloneCommand(ctx, args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	stdout, err := cmd.StdoutPipe()
+	timing := e.beginExecutionTiming()
+	command := e.rcloneCommand(ctx, args...)
+	stderr := &bytes.Buffer{}
+	command.Stderr = stderr
+	stdout, err := command.StdoutPipe()
 	if err != nil {
 		e.logger.FileError(fmt.Sprintf("rclone pipe setup failed for %s: %v", displayName, err))
-		return ItemResult{Name: displayName, Status: StatusFailed}
+		return rcloneExecution{}, &ItemResult{Name: displayName, Status: StatusFailed}
 	}
 
-	if err := cmd.Start(); err != nil {
+	execution := rcloneExecution{
+		command:      command,
+		stdout:       stdout,
+		stderr:       stderr,
+		displayName:  displayName,
+		subcommand:   subcommand,
+		logStartLine: timing.logStartLine,
+		startedAt:    timing.startedAt,
+	}
+	if err := command.Start(); err != nil {
 		status := classifyExitStatus(ctx, err)
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime: %v", displayName, err))
+			e.logger.FileError(fmt.Sprintf(
+				"rclone timed out for %s after per-job max_runtime: %v",
+				displayName,
+				err,
+			))
 		} else {
 			e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
 		}
-		return ItemResult{Name: displayName, Status: status}
+		return rcloneExecution{}, &ItemResult{Name: displayName, Status: status}
 	}
+	return execution, nil
+}
 
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(1)
+func (e *RcloneExecutor) scanExecutionProgress(
+	execution rcloneExecution,
+	onProgress func(string),
+) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
-		defer pipeWg.Done()
-		if scanErr := scanRcloneProgress(stdout, onProgress); scanErr != nil {
-			e.logger.FileError(fmt.Sprintf("reading rclone progress for %s: %v", displayName, scanErr))
+		defer close(done)
+		if err := scanRcloneProgress(execution.stdout, onProgress); err != nil {
+			e.logger.FileError(fmt.Sprintf(
+				"reading rclone progress for %s: %v",
+				execution.displayName,
+				err,
+			))
 		}
 	}()
+	return done
+}
 
-	pipeWg.Wait()
-	runErr := cmd.Wait()
-	elapsed := time.Since(start)
+func (e *RcloneExecutor) waitForExecution(
+	ctx context.Context,
+	execution rcloneExecution,
+	progressDone <-chan struct{},
+) ItemResult {
+	<-progressDone
+	runError := execution.command.Wait()
+	elapsed := e.now().Sub(execution.startedAt)
 
-	if stderrBuf.Len() > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(stderrBuf.String()), "\n") {
+	if execution.stderr.Len() > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(execution.stderr.String()), "\n") {
 			if line != "" {
 				e.logger.FileError(line)
 			}
@@ -185,25 +271,31 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 
 	var stats TransferStats
 	if e.logFile != "" {
-		logSection := readLinesAfter(e.logFile, logStartLine)
+		logSection := readLinesAfter(e.logFile, execution.logStartLine)
 		stats = ParseRcloneStats(logSection)
 	}
 	stats.Elapsed = elapsed
 
-	status := classifyExitStatus(ctx, runErr)
-	if runErr != nil {
-		subcommand := "rclone"
-		if len(args) > 0 {
-			subcommand = "rclone " + args[0]
-		}
+	status := classifyExitStatus(ctx, runError)
+	if runError != nil {
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("%s timed out for %s after per-job max_runtime: %v", subcommand, displayName, runErr))
+			e.logger.FileError(fmt.Sprintf(
+				"%s timed out for %s after per-job max_runtime: %v",
+				execution.subcommand,
+				execution.displayName,
+				runError,
+			))
 		} else {
-			e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
+			e.logger.FileError(fmt.Sprintf(
+				"%s failed for %s: %v",
+				execution.subcommand,
+				execution.displayName,
+				runError,
+			))
 		}
 	}
 
-	return ItemResult{Name: displayName, Status: status, Stats: stats}
+	return ItemResult{Name: execution.displayName, Status: status, Stats: stats}
 }
 
 // modeRequest carries the inputs selectMode needs to pick the rclone
@@ -223,7 +315,7 @@ type modeRequest struct {
 // configured, the backup-dir is constructed as:
 //
 //	remote:<backup_path>/<run_timestamp>/<dest_subpath>/
-func selectMode(req modeRequest, logger *log.Logger) (subcommand, backupDirArg string) {
+func selectMode(req modeRequest, logger InformationLogger) (subcommand, backupDirArg string) {
 	if req.Mode == config.ModeCopy || !req.IsDir {
 		if req.Mode == config.ModeSync && !req.IsDir {
 			logger.Info("mode is 'sync' but source is a file; using 'rclone copy'")
@@ -302,67 +394,120 @@ func (e *RcloneExecutor) purgeArchiveDir(ctx context.Context, target string) err
 	return e.rcloneCommand(ctx, purgeArgs...).Run()
 }
 
-// CleanupArchives purges archive subdirectories older than retentionDays
-// from the backup root on the given remote. Individual purge failures are
+// CleanupArchives purges archive subdirectories older than the requested
+// retention from the selected remote. Individual purge failures are
 // logged as warnings and do not stop processing of remaining directories,
 // but a failure to list the backup root at all is returned as an error so
 // the caller can surface it; a missing backup root (rclone exit 3) is the
 // expected first-run state and stays a non-error. Skipped during dry-run,
-// when backupPath is empty, or when retentionDays is non-positive.
-func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backupPath string, retentionDays int, dryRun bool) error {
-	if backupPath == "" || retentionDays <= 0 || dryRun {
+// when the backup path is empty, or when retention is non-positive.
+func (e *RcloneExecutor) CleanupArchives(ctx context.Context, request ArchiveCleanupRequest) error {
+	plan, shouldRun := prepareArchiveCleanup(request)
+	if !shouldRun {
 		return nil
 	}
+	listing, err := e.readArchiveDirectoryListing(ctx, plan)
+	if err != nil {
+		return err
+	}
+	return e.purgeExpiredArchiveDirectories(ctx, archivePurgeRequest{
+		plan:    plan,
+		listing: bytes.NewReader(listing),
+		purge:   e.purgeArchiveDir,
+	})
+}
 
-	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(archiveDateLayout)
-	archiveRoot := fmt.Sprintf("%s:%s", remoteName, strings.TrimRight(backupPath, "/"))
+type archiveCleanupPlan struct {
+	remoteName  string
+	archiveRoot string
+	cutoff      string
+}
 
-	lsdArgs := []string{"lsd", archiveRoot + "/"}
+func prepareArchiveCleanup(request ArchiveCleanupRequest) (archiveCleanupPlan, bool) {
+	if request.BackupPath == "" || request.RetentionDays <= 0 || request.DryRun {
+		return archiveCleanupPlan{}, false
+	}
+	return archiveCleanupPlan{
+		remoteName:  request.RemoteName,
+		archiveRoot: fmt.Sprintf("%s:%s", request.RemoteName, strings.TrimRight(request.BackupPath, "/")),
+		cutoff:      time.Now().AddDate(0, 0, -request.RetentionDays).Format(archiveDateLayout),
+	}, true
+}
+
+func (e *RcloneExecutor) readArchiveDirectoryListing(
+	ctx context.Context,
+	plan archiveCleanupPlan,
+) ([]byte, error) {
+	lsdArgs := []string{"lsd", plan.archiveRoot + "/"}
 	if e.logFile != "" {
 		lsdArgs = append(lsdArgs, "--log-file", e.logFile, "--log-level", "INFO")
 	}
 	output, err := e.rcloneCommand(ctx, lsdArgs...).Output()
 	if err != nil {
 		if isDirNotFound(err) {
-			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", remoteName))
-			return nil
+			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", plan.remoteName))
+			return nil, nil
 		}
 		if detail := firstStderrLine(err); detail != "" {
-			return fmt.Errorf("listing archive root %s: %w (%s)", archiveRoot, err, detail)
+			return nil, fmt.Errorf("listing archive root %s: %w (%s)", plan.archiveRoot, err, detail)
 		}
-		return fmt.Errorf("listing archive root %s: %w", archiveRoot, err)
+		return nil, fmt.Errorf("listing archive root %s: %w", plan.archiveRoot, err)
 	}
+	return output, nil
+}
 
+type archivePurgeRequest struct {
+	plan    archiveCleanupPlan
+	listing io.Reader
+	purge   func(context.Context, string) error
+}
+
+func (e *RcloneExecutor) purgeExpiredArchiveDirectories(
+	ctx context.Context,
+	request archivePurgeRequest,
+) error {
 	purged := 0
-	scanner := bufio.NewScanner(bytes.NewReader(output))
+	scanner := bufio.NewScanner(request.listing)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 0 {
 			continue
 		}
-		dirName := fields[len(fields)-1]
-		expired, recognized := archiveDirExpired(dirName, cutoff)
+		directory := fields[len(fields)-1]
+		expired, recognized := archiveDirExpired(directory, request.plan.cutoff)
 		if !recognized {
-			e.logger.Warn(fmt.Sprintf("archive cleanup: skipping unrecognized directory %s on %s", dirName, remoteName))
+			e.logger.Warn(fmt.Sprintf(
+				"archive cleanup: skipping unrecognized directory %s on %s",
+				directory,
+				request.plan.remoteName,
+			))
 			continue
 		}
 		if !expired {
 			continue
 		}
-		target := archiveRoot + "/" + dirName
-		e.logger.Info(fmt.Sprintf("purging expired archive: %s (%s < %s)", target, dirName[:len(archiveDateLayout)], cutoff))
-		if purgeErr := e.purgeArchiveDir(ctx, target); purgeErr != nil {
+		target := request.plan.archiveRoot + "/" + directory
+		e.logger.Info(fmt.Sprintf(
+			"purging expired archive: %s (%s < %s)",
+			target,
+			directory[:len(archiveDateLayout)],
+			request.plan.cutoff,
+		))
+		if purgeErr := request.purge(ctx, target); purgeErr != nil {
 			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
 		} else {
 			purged++
 		}
 	}
-	if scanErr := scanner.Err(); scanErr != nil {
-		return fmt.Errorf("scanning archive listing for %s: %w", archiveRoot, scanErr)
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanning archive listing for %s: %w", request.plan.archiveRoot, err)
 	}
-
 	if purged > 0 {
-		e.logger.Info(fmt.Sprintf("archive cleanup: purged %d expired director(ies) from %s", purged, remoteName))
+		e.logger.Info(fmt.Sprintf(
+			"archive cleanup: purged %d expired director(ies) from %s",
+			purged,
+			request.plan.remoteName,
+		))
 	}
 	return nil
 }
