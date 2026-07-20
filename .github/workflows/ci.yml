@@ -49,11 +49,23 @@ jobs:
             /usr/local/bin/rclone
 
       - name: Verify sync tools
+        shell: bash
         run: |
+          set -euo pipefail
           command -v rsync
-          command -v rclone
           rsync --version
-          rclone version
+          resolved_rclone="$(command -v rclone)"
+          if [[ "${resolved_rclone}" != "/usr/local/bin/rclone" ]]; then
+            echo "unexpected rclone executable: ${resolved_rclone}" >&2
+            exit 1
+          fi
+          printf '%s\n' "${resolved_rclone}"
+          rclone_version="$("${resolved_rclone}" version)"
+          if [[ "${rclone_version%%$'\n'*}" != "rclone v${RCLONE_VERSION}" ]]; then
+            echo "unexpected rclone version: ${rclone_version%%$'\n'*}" >&2
+            exit 1
+          fi
+          printf '%s\n' "${rclone_version}"
 
       - name: Build
         run: go build ./...
