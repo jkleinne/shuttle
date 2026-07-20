@@ -57,11 +57,24 @@ func newTestFileRunLocker(t *testing.T) *FileRunLocker {
 	t.Helper()
 	locker := NewFileRunLocker()
 	t.Cleanup(func() {
-		if locker.lockFile != nil {
-			_ = locker.lockFile.Close()
-		}
+		_ = locker.Release()
 	})
 	return locker
+}
+
+type blockingRsyncExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *blockingRsyncExecutor) Exec(
+	context.Context,
+	[]string,
+	func(string),
+) ItemResult {
+	close(e.started)
+	<-e.release
+	return ItemResult{Status: StatusOK}
 }
 
 // runPipeline builds a Runner over cfg with a discard logger and a
@@ -72,6 +85,9 @@ func newTestFileRunLocker(t *testing.T) *FileRunLocker {
 // NewRunner/Run directly instead.
 func runPipeline(t *testing.T, cfg *config.Config, configPath string, opts RunOptions) Summary {
 	t.Helper()
+	if err := os.WriteFile(configPath, []byte("# test config\n"), 0o600); err != nil {
+		t.Fatalf("writing config identity fixture: %v", err)
+	}
 	plan, err := BuildRunPlan(cfg, opts)
 	if err != nil {
 		t.Fatalf("BuildRunPlan() error = %v", err)
@@ -285,43 +301,34 @@ func TestPipeline_OnlyFilter_SkipsUnselectedJob(t *testing.T) {
 }
 
 func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
-	// An optional job with a missing source is selected work but invokes no
-	// external tool. run1 acquires the per-config flock and holds it open
-	// (released only at process exit); a second Run on the same configPath must
-	// be rejected. Calls NewRunner/Run directly rather than via runPipeline,
-	// which would t.Fatalf on the expected error.
 	cfg := &config.Config{Jobs: []config.Job{{
-		Name:        "optional-device",
+		Name:        "local",
 		Engine:      config.EngineRsync,
-		Sources:     []string{filepath.Join(t.TempDir(), "missing")},
+		Sources:     []string{t.TempDir()},
 		Destination: t.TempDir(),
-		Optional:    true,
 	}}}
 	plan, err := BuildRunPlan(cfg, RunOptions{})
 	if err != nil {
 		t.Fatalf("BuildRunPlan() error = %v", err)
 	}
 	configPath := filepath.Join(t.TempDir(), "config.toml")
-
-	newRunner := func(tag string) *Runner {
-		logFile := filepath.Join(t.TempDir(), tag+".log")
-		logger, err := log.NewWithWriter(io.Discard, logFile, log.Options{
-			UseColor:  false,
-			Verbosity: log.VerbosityNormal,
-		})
-		if err != nil {
-			t.Fatalf("creating logger %s: %v", tag, err)
-		}
-		t.Cleanup(logger.Close)
+	if err := os.WriteFile(configPath, []byte("# test config\n"), 0o600); err != nil {
+		t.Fatalf("writing config identity fixture: %v", err)
+	}
+	blockingExecutor := &blockingRsyncExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	newRunner := func(rsync RsyncCommandExecutor) *Runner {
 		runner, err := NewRunner(RunnerConfig{
 			Plan:          plan,
 			ConfigPath:    configPath,
-			Logger:        logger,
-			Progress:      NewProgressWriter(io.Discard, ProgressOptions{}),
-			Prerequisites: NewSystemPrerequisiteChecker(),
+			Logger:        &stubRunnerLogger{},
+			Progress:      &stubRunnerProgress{},
+			Prerequisites: &stubPrerequisiteChecker{},
 			Locker:        newTestFileRunLocker(t),
-			Rsync:         NewRsyncExecutor(logger),
-			Rclone:        NewRcloneExecutor(logger, ""),
+			Rsync:         rsync,
+			Rclone:        &stubRcloneCommandExecutor{},
 		})
 		if err != nil {
 			t.Fatalf("NewRunner() error = %v", err)
@@ -329,12 +336,15 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 		return runner
 	}
 
-	run1 := newRunner("run1")
-	if _, err := run1.Run(context.Background()); err != nil {
-		t.Fatalf("run1.Run returned error: %v", err)
-	}
+	run1 := newRunner(blockingExecutor)
+	run1Done := make(chan error, 1)
+	go func() {
+		_, runErr := run1.Run(context.Background())
+		run1Done <- runErr
+	}()
+	<-blockingExecutor.started
 
-	run2 := newRunner("run2")
+	run2 := newRunner(&stubRsyncCommandExecutor{})
 	_, err = run2.Run(context.Background())
 	if err == nil {
 		t.Fatal("run2.Run returned nil, want a lock-contention error")
@@ -342,9 +352,10 @@ func TestPipeline_LockContention_SecondRunRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), "already running") {
 		t.Errorf("error = %q, want it to contain %q", err.Error(), "already running")
 	}
-
-	// Keep run1 alive until after run2 runs so its lock fd is not finalized early.
-	_ = run1
+	close(blockingExecutor.release)
+	if err := <-run1Done; err != nil {
+		t.Fatalf("run1.Run returned error: %v", err)
+	}
 }
 
 func TestPipeline_RcloneMultiRemote_ExpandsAdjacently(t *testing.T) {

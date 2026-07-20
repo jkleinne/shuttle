@@ -119,10 +119,9 @@ func TestBuildRunPlan_SelectionPreservesExecutionOrder(t *testing.T) {
 	}
 }
 
-func TestRunner_DoesNotExposePrimaryLogPathToExecutors(t *testing.T) {
+func TestRunner_DoesNotAddPrimaryLogFlagsToExecutors(t *testing.T) {
 	rsyncSource := t.TempDir()
 	rcloneSource := t.TempDir()
-	primaryLogPath := filepath.Join(t.TempDir(), "primary.log")
 	cfg := &config.Config{Jobs: []config.Job{
 		{
 			Name:        "local",
@@ -162,8 +161,10 @@ func TestRunner_DoesNotExposePrimaryLogPathToExecutors(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	for _, invocation := range append(rsync.args, rclone.args...) {
-		if strings.Contains(strings.Join(invocation, "\x00"), primaryLogPath) {
-			t.Errorf("executor arguments expose primary log path %q: %v", primaryLogPath, invocation)
+		for _, argument := range invocation {
+			if argument == logFileFlag || strings.HasPrefix(argument, logFileFlag+"=") {
+				t.Errorf("executor arguments add a primary log flag: %v", invocation)
+			}
 		}
 	}
 }
@@ -232,6 +233,65 @@ func TestBuildRunPlan_NilConfigWrapsInvalidPlan(t *testing.T) {
 	_, err := BuildRunPlan(nil, RunOptions{})
 	if !errors.Is(err, ErrInvalidRunPlan) {
 		t.Fatalf("BuildRunPlan(nil) error = %v, want ErrInvalidRunPlan", err)
+	}
+}
+
+func TestBuildRunPlan_RejectsInvalidSelection(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{
+		{
+			Name:        "local",
+			Engine:      config.EngineRsync,
+			Sources:     []string{t.TempDir()},
+			Destination: t.TempDir(),
+		},
+		{
+			Name:    "cloud",
+			Engine:  config.EngineRclone,
+			Source:  t.TempDir(),
+			Remotes: []string{"north"},
+			Mode:    config.ModeCopy,
+		},
+	}}
+	tests := []struct {
+		name    string
+		options RunOptions
+		want    string
+	}{
+		{
+			name: "skip and only conflict",
+			options: RunOptions{
+				SkipJobs: []string{"local"},
+				OnlyJobs: []string{"cloud"},
+			},
+			want: "mutually exclusive",
+		},
+		{
+			name:    "unknown skipped job",
+			options: RunOptions{SkipJobs: []string{"typo"}},
+			want:    `unknown job "typo"`,
+		},
+		{
+			name:    "unknown only job",
+			options: RunOptions{OnlyJobs: []string{"typo"}},
+			want:    `unknown job "typo"`,
+		},
+		{
+			name:    "unknown remote",
+			options: RunOptions{SelectedRemotes: []string{"south"}},
+			want:    `unknown remote "south"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := BuildRunPlan(cfg, test.options)
+			if err == nil {
+				t.Fatal("BuildRunPlan() error = nil, want invalid selection error")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("BuildRunPlan() error = %q, want %q", err, test.want)
+			}
+		})
 	}
 }
 

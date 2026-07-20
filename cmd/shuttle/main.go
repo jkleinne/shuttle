@@ -196,6 +196,7 @@ func newDoctorCommand(cli *cliFlags) *cobra.Command {
 		Use:   "doctor",
 		Short: "Check environment and configuration readiness",
 		RunE: func(command *cobra.Command, _ []string) error {
+			output := command.OutOrStdout()
 			path, explicit, err := resolveConfigPath(cli.ConfigPath)
 			if err != nil {
 				return err
@@ -209,10 +210,10 @@ func newDoctorCommand(cli *cliFlags) *cobra.Command {
 			})
 			colorMode := resolveColor(colorInputs{
 				mode:               cli.ColorMode,
-				stdoutIsTerminal:   term.IsTerminal(int(os.Stdout.Fd())),
+				stdoutIsTerminal:   writerIsTerminal(output),
 				isNoColorRequested: os.Getenv("NO_COLOR") != "",
 			})
-			engine.RenderReport(command.OutOrStdout(), report, colorMode)
+			engine.RenderReport(output, report, colorMode)
 			if report.HasFailures() {
 				return errDoctorFailed
 			}
@@ -228,6 +229,11 @@ func newDoctorCommand(cli *cliFlags) *cobra.Command {
 		"Colorize terminal output: auto|always|never",
 	)
 	return command
+}
+
+func writerIsTerminal(writer io.Writer) bool {
+	descriptor, ok := writer.(interface{ Fd() uintptr })
+	return ok && term.IsTerminal(int(descriptor.Fd()))
 }
 
 func registerRunFlags(command *cobra.Command, cli *cliFlags) {
@@ -459,16 +465,6 @@ func prepareRun(cli cliFlags) (runPreparation, error) {
 		return runPreparation{}, fmt.Errorf("loading config: %w", err)
 	}
 
-	if err := engine.ValidateJobNames(
-		cli.RunOpts.SkipJobs,
-		cli.RunOpts.OnlyJobs,
-		cfg.JobNames(),
-	); err != nil {
-		return runPreparation{}, err
-	}
-	if err := validateRemoteNames(cli.RunOpts.SelectedRemotes, cfg.AllRemoteNames()); err != nil {
-		return runPreparation{}, err
-	}
 	plan, err := engine.BuildRunPlan(cfg, cli.RunOpts)
 	if err != nil {
 		return runPreparation{}, err
@@ -609,24 +605,6 @@ func renderRunResult(session runSession, summary engine.Summary) error {
 	}
 	if summary.HasErrors() {
 		return errPartialFailure
-	}
-	return nil
-}
-
-// validateRemoteNames returns an error when any selected remote is not present
-// in the union of all rclone jobs' remote names. A nil or empty selection is always valid.
-func validateRemoteNames(selected, configured []string) error {
-	if len(selected) == 0 {
-		return nil
-	}
-	valid := make(map[string]bool, len(configured))
-	for _, r := range configured {
-		valid[r] = true
-	}
-	for _, r := range selected {
-		if !valid[r] {
-			return fmt.Errorf("unknown remote %q; configured: %v", r, configured)
-		}
 	}
 	return nil
 }

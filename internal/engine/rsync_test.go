@@ -262,18 +262,22 @@ func TestRsyncExec_HostileFilenameTransfersWithTrustedLogFrames(t *testing.T) {
 	}
 }
 
-func TestRsyncStdout_ProgressUpdatesButOnlyDiagnosticsReachToolLog(t *testing.T) {
+func TestRsyncStdout_ProgressUpdatesAndAllRecordsReachToolLog(t *testing.T) {
 	logger, logPath := newTestLoggerWithPath(t)
 	executor := NewRsyncExecutor(logger)
 	statsTail := newTailBuffer(statisticsTailBytes)
 	var progress []string
 
-	executor.captureStdoutRecord(
+	executor.captureProgressRecord(
 		"  1,234  45%   2.30MB/s  0:01:23 (xfr#1, to-chk=1/2)",
 		statsTail,
 		func(text string) { progress = append(progress, text) },
 	)
-	executor.captureStdoutRecord("Number of files: 10", statsTail, nil)
+	executor.captureStdoutRecord("Number of files: 10", statsTail)
+	executor.captureStdoutRecord(
+		"4.19M 45% (xfr#999)",
+		statsTail,
+	)
 
 	if len(progress) != 1 || !strings.Contains(progress[0], "45%") {
 		t.Errorf("progress callbacks = %q, want one 45%% update", progress)
@@ -283,11 +287,44 @@ func TestRsyncStdout_ProgressUpdatesButOnlyDiagnosticsReachToolLog(t *testing.T)
 		t.Errorf("statistics tail = %q, want both normalized records", got)
 	}
 	logged := assertPrimaryLogFrames(t, logPath, "RSYNC")
-	if strings.Contains(logged, "45%") {
-		t.Errorf("progress repaint leaked into primary tool log: %q", logged)
+	if !strings.Contains(logged, "1,234  45%   2.30MB/s") {
+		t.Errorf("primary tool log omitted progress repaint record: %q", logged)
 	}
 	if !strings.Contains(logged, "Number of files: 10") {
 		t.Errorf("diagnostic record missing from primary tool log: %q", logged)
+	}
+	if !strings.Contains(logged, "4.19M 45% (xfr#999)") {
+		t.Errorf("progress-shaped filename missing from primary tool log: %q", logged)
+	}
+}
+
+func TestRsyncDrainOutput_DistinguishesFilenameFromCarriageReturnProgress(t *testing.T) {
+	logger, logPath := newTestLoggerWithPath(t)
+	executor := NewRsyncExecutor(logger)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	const progressShapedFilename = "4.19M 45% 2.30MB/s 0:00:01 (xfr#999)"
+	stdout := strings.NewReader(
+		progressShapedFilename + "\n" +
+			"\r  1,234  45%  2.30MB/s  0:01:23 (xfr#1, to-chk=1/2)\n",
+	)
+	var progress []string
+
+	stdoutErr, stderrErr := executor.drainOutput(
+		stdout,
+		strings.NewReader(""),
+		statsTail,
+		func(text string) { progress = append(progress, text) },
+	)
+
+	if stdoutErr != nil || stderrErr != nil {
+		t.Fatalf("drainOutput() errors = (%v, %v), want nil", stdoutErr, stderrErr)
+	}
+	if len(progress) != 1 || !strings.Contains(progress[0], "0:01:23 remaining") {
+		t.Errorf("progress callbacks = %q, want only carriage-return progress", progress)
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RSYNC")
+	if !strings.Contains(logged, progressShapedFilename) {
+		t.Errorf("primary log missing progress-shaped filename: %q", logged)
 	}
 }
 
@@ -337,6 +374,11 @@ func TestParseRsyncProgress_TypicalLine(t *testing.T) {
 			"4.19M-report 45% speed/s 0:00:01 (xfr#999).txt",
 			"",
 		},
+		{
+			"bare filename under user out format",
+			"4.19M 45% (xfr#999)",
+			"",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -361,7 +403,7 @@ func TestScanRsyncProgress_PopulatesCapture(t *testing.T) {
 }
 
 func TestScanRsyncProgress_CallsOnProgress(t *testing.T) {
-	input := "  1,234  45%   2.30MB/s    0:01:23 (xfr#1, to-chk=1/2)\r\n"
+	input := "\r  1,234  45%   2.30MB/s    0:01:23 (xfr#1, to-chk=1/2)\n"
 	r := strings.NewReader(input)
 	var capture bytes.Buffer
 

@@ -4,9 +4,24 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type blockingSecondWrite struct {
+	calls         atomic.Int32
+	secondEntered chan struct{}
+	releaseSecond chan struct{}
+}
+
+func (w *blockingSecondWrite) Write(p []byte) (int, error) {
+	if w.calls.Add(1) == 2 {
+		close(w.secondEntered)
+		<-w.releaseSecond
+	}
+	return len(p), nil
+}
 
 func TestProgressWriter_NonInteractive_FinishJob_OK(t *testing.T) {
 	var buf bytes.Buffer
@@ -172,5 +187,32 @@ func TestProgressWriter_Interactive_MultipleJobs(t *testing.T) {
 	}
 	if !strings.Contains(out, "failed") {
 		t.Error("missing failure status")
+	}
+}
+
+func TestProgressWriter_Interactive_TickerSerializesOutput(t *testing.T) {
+	writer := &blockingSecondWrite{
+		secondEntered: make(chan struct{}),
+		releaseSecond: make(chan struct{}),
+	}
+	ticks := make(chan time.Time)
+	progress := NewProgressWriter(writer, ProgressOptions{Mode: ProgressInteractive})
+	progress.ticks = ticks
+
+	progress.StartJob(context.Background(), "photos")
+	ticks <- time.Now()
+	<-writer.secondEntered
+
+	if progress.outputMutex.TryLock() {
+		progress.outputMutex.Unlock()
+		close(writer.releaseSecond)
+		progress.FinishJob(ItemResult{Status: StatusOK})
+		t.Fatal("ticker render did not hold the output serialization mutex")
+	}
+
+	close(writer.releaseSecond)
+	progress.FinishJob(ItemResult{Status: StatusOK})
+	if got := writer.calls.Load(); got < 3 {
+		t.Errorf("writer calls = %d, want initial, ticker, and finish writes", got)
 	}
 }

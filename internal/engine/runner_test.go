@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,41 +65,73 @@ func (*stubRunnerProgress) FinishJob(ItemResult)             {}
 
 type stubPrerequisiteChecker struct {
 	requests []PrerequisiteRequest
+	err      error
+	events   *[]string
 }
 
 func (s *stubPrerequisiteChecker) Check(request PrerequisiteRequest) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "prerequisites")
+	}
 	request.FilterFiles = append([]string(nil), request.FilterFiles...)
 	s.requests = append(s.requests, request)
-	return nil
+	return s.err
 }
 
 type stubRunLocker struct {
-	configPaths []string
+	configPaths  []string
+	acquireErr   error
+	releaseErr   error
+	releaseCalls int
+	events       *[]string
 }
 
 func (s *stubRunLocker) Acquire(configPath string) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "acquire")
+	}
 	s.configPaths = append(s.configPaths, configPath)
-	return nil
+	return s.acquireErr
+}
+
+func (s *stubRunLocker) Release() error {
+	if s.events != nil {
+		*s.events = append(*s.events, "release")
+	}
+	s.releaseCalls++
+	return s.releaseErr
 }
 
 type stubRsyncCommandExecutor struct {
-	calls int
-	args  [][]string
+	calls  int
+	args   [][]string
+	events *[]string
 }
 
 func (s *stubRsyncCommandExecutor) Exec(_ context.Context, args []string, _ func(string)) ItemResult {
+	if s.events != nil {
+		*s.events = append(*s.events, "rsync")
+	}
 	s.calls++
 	s.args = append(s.args, append([]string(nil), args...))
 	return ItemResult{Status: StatusOK}
 }
 
-type stubRcloneCommandExecutor struct{}
+type stubRcloneCommandExecutor struct {
+	events *[]string
+}
 
-func (*stubRcloneCommandExecutor) Exec(context.Context, []string, func(string)) ItemResult {
+func (s *stubRcloneCommandExecutor) Exec(context.Context, []string, func(string)) ItemResult {
+	if s.events != nil {
+		*s.events = append(*s.events, "rclone")
+	}
 	return ItemResult{Status: StatusOK}
 }
 
-func (*stubRcloneCommandExecutor) CleanupArchives(context.Context, ArchiveCleanupRequest) error {
+func (s *stubRcloneCommandExecutor) CleanupArchives(context.Context, ArchiveCleanupRequest) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "cleanup")
+	}
 	return nil
 }
 
@@ -326,8 +359,140 @@ func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
 	if len(locker.configPaths) != 1 {
 		t.Errorf("lock acquisitions = %d, want 1", len(locker.configPaths))
 	}
+	if locker.releaseCalls != 1 {
+		t.Errorf("lock releases = %d, want 1", locker.releaseCalls)
+	}
 	if got := summary.Jobs[0].Items[0].Status; got != StatusOK {
 		t.Errorf("status = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestRunner_Run_BoundaryOrder(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:                "cloud",
+		Engine:              config.EngineRclone,
+		Source:              t.TempDir(),
+		Remotes:             []string{"remote"},
+		Mode:                config.ModeCopy,
+		BackupPath:          "archive",
+		BackupRetentionDays: 30,
+	}}}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
+	var events []string
+	rc.Prerequisites = &stubPrerequisiteChecker{events: &events}
+	rc.Locker = &stubRunLocker{events: &events}
+	rc.Rclone = &stubRcloneCommandExecutor{events: &events}
+	runner, err := NewRunner(rc)
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	want := []string{"prerequisites", "acquire", "cleanup", "rclone", "release"}
+	if !slices.Equal(events, want) {
+		t.Errorf("boundary order = %v, want %v", events, want)
+	}
+}
+
+func TestRunner_Run_BoundaryFailuresShortCircuit(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:        "local",
+		Engine:      config.EngineRsync,
+		Sources:     []string{t.TempDir()},
+		Destination: t.TempDir(),
+	}}}
+	plan := buildTestRunPlan(t, cfg, RunOptions{})
+	prerequisiteErr := errors.New("prerequisite failure")
+	lockErr := errors.New("lock failure")
+	tests := []struct {
+		name             string
+		prerequisiteErr  error
+		lockErr          error
+		wantErr          error
+		wantEvents       []string
+		wantReleaseCalls int
+	}{
+		{
+			name:            "prerequisite failure",
+			prerequisiteErr: prerequisiteErr,
+			wantErr:         prerequisiteErr,
+			wantEvents:      []string{"prerequisites"},
+		},
+		{
+			name:       "lock failure",
+			lockErr:    lockErr,
+			wantErr:    lockErr,
+			wantEvents: []string{"prerequisites", "acquire"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rc := validRunnerConfig(t, plan)
+			var events []string
+			locker := &stubRunLocker{
+				acquireErr: test.lockErr,
+				events:     &events,
+			}
+			rc.Prerequisites = &stubPrerequisiteChecker{
+				err:    test.prerequisiteErr,
+				events: &events,
+			}
+			rc.Locker = locker
+			rc.Rsync = &stubRsyncCommandExecutor{events: &events}
+			runner, err := NewRunner(rc)
+			if err != nil {
+				t.Fatalf("NewRunner() error = %v", err)
+			}
+
+			_, err = runner.Run(context.Background())
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("Run() error = %v, want %v", err, test.wantErr)
+			}
+			if !slices.Equal(events, test.wantEvents) {
+				t.Errorf("boundary events = %v, want %v", events, test.wantEvents)
+			}
+			if locker.releaseCalls != test.wantReleaseCalls {
+				t.Errorf(
+					"release calls = %d, want %d",
+					locker.releaseCalls,
+					test.wantReleaseCalls,
+				)
+			}
+		})
+	}
+}
+
+func TestRunner_Run_ReturnsReleaseFailureAfterExecution(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:        "local",
+		Engine:      config.EngineRsync,
+		Sources:     []string{t.TempDir()},
+		Destination: t.TempDir(),
+	}}}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
+	releaseErr := errors.New("release failure")
+	locker := &stubRunLocker{releaseErr: releaseErr}
+	rc.Locker = locker
+	runner, err := NewRunner(rc)
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	summary, err := runner.Run(context.Background())
+
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("Run() error = %v, want release failure", err)
+	}
+	if len(summary.Jobs) != 1 || summary.Jobs[0].Items[0].Status != StatusOK {
+		t.Errorf("Run() summary = %+v, want completed job before release failure", summary)
+	}
+	if locker.releaseCalls != 1 {
+		t.Errorf("release calls = %d, want 1", locker.releaseCalls)
 	}
 }
 

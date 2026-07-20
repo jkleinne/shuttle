@@ -26,6 +26,16 @@ const (
 	colorReset  = "\033[0m"
 )
 
+// ToolSource is the closed set of external tools allowed to define log frames.
+type ToolSource uint8
+
+const (
+	// ToolRsync identifies records captured from rsync.
+	ToolRsync ToolSource = iota + 1
+	// ToolRclone identifies records captured from rclone.
+	ToolRclone
+)
+
 // hoursPerDay is used when converting a retention window expressed in days
 // into a time.Duration. Extracted as a named constant per project rules
 // against unlabelled numeric literals.
@@ -305,17 +315,17 @@ func (l *Logger) FileError(msg string) {
 // FileTool writes one complete file-only record from a known external tool.
 // Unknown identities retain their sanitized context under Logger's trusted
 // error frame instead of defining a new tool prefix.
-func (l *Logger) FileTool(source, record string) {
+func (l *Logger) FileTool(source ToolSource, record string) {
 	record = sanitizeLogText(record)
-	switch strings.ToUpper(source) {
-	case "RSYNC":
+	switch source {
+	case ToolRsync:
 		l.filef("[RSYNC] %s", record)
-	case "RCLONE":
+	case ToolRclone:
 		l.filef("[RCLONE] %s", record)
 	default:
 		l.filef(
-			"[ERROR] unexpected tool source %q: %s",
-			sanitizeLogText(source),
+			"[ERROR] unexpected tool source %d: %s",
+			source,
 			record,
 		)
 	}
@@ -323,7 +333,7 @@ func (l *Logger) FileTool(source, record string) {
 
 func sanitizeLogText(text string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
 			return -1
 		}
 		return r

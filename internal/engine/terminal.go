@@ -40,7 +40,7 @@ type ProgressOptions struct {
 // text cannot drive a terminal while its printable content remains visible.
 func SanitizeTerminalText(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
 			return -1
 		}
 		return r

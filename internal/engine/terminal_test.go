@@ -20,6 +20,7 @@ func TestSanitizeTerminalText_SanitizesControlRunes(t *testing.T) {
 		{name: "C0 newline and tab", in: "a\nb\tc", want: "abc"},
 		{name: "C1 CSI", in: "a\u009b31mb", want: "a31mb"},
 		{name: "DEL", in: "a\x7fb", want: "ab"},
+		{name: "bidi controls", in: "a\u061c\u200e\u202e\u2066b\u2069", want: "ab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,12 +100,17 @@ func TestBuildRsyncArgs_InstrumentationPrecedesUserFlags(t *testing.T) {
 		Source:      "/src",
 		Destination: "/dst",
 	})
-	wantPrefix := []string{"--stats", "--info=progress2", "--out-format=%i %n%L"}
-	if got := strings.Join(args[:len(wantPrefix)], " "); got != strings.Join(wantPrefix, " ") {
-		t.Errorf("instrumentation prefix = %q, want %q", got, strings.Join(wantPrefix, " "))
+	want := []string{
+		"--stats",
+		"--info=progress2",
+		"--out-format=%i %n%L",
+		"--stats",
+		"--out-format=user",
+		"/src",
+		"/dst",
 	}
-	if strings.Contains(strings.Join(args, " "), "/tmp/shuttle.log") {
-		t.Errorf("arguments expose Shuttle primary log path: %v", args)
+	if !slices.Equal(args, want) {
+		t.Errorf("BuildRsyncArgs() = %v, want %v", args, want)
 	}
 }
 
@@ -185,7 +191,7 @@ func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
 		t.Errorf("instrumentation prefix = %q, want %q", got, strings.Join(wantPrefix, " "))
 	}
 	for _, arg := range args {
-		if arg == "--log-file" || strings.HasPrefix(arg, "--log-file=") {
+		if arg == logFileFlag || strings.HasPrefix(arg, logFileFlag+"=") {
 			t.Errorf("Shuttle instrumentation exposes a primary log path: %v", args)
 		}
 	}

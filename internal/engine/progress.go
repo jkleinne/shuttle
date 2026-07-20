@@ -31,6 +31,8 @@ type ProgressWriter struct {
 
 	done chan struct{}
 	wg   sync.WaitGroup
+	// ticks is a deterministic test seam. Production uses a real ticker when nil.
+	ticks <-chan time.Time
 }
 
 // NewProgressWriter creates the terminal progress boundary with explicit,
@@ -148,8 +150,13 @@ func (pw *ProgressWriter) SkipJob(name string) {
 // regular intervals until done is closed or ctx is canceled.
 func (pw *ProgressWriter) spin(ctx context.Context) {
 	defer pw.wg.Done()
-	ticker := time.NewTicker(spinnerInterval)
-	defer ticker.Stop()
+	ticks := pw.ticks
+	var ticker *time.Ticker
+	if ticks == nil {
+		ticker = time.NewTicker(spinnerInterval)
+		ticks = ticker.C
+		defer ticker.Stop()
+	}
 
 	for {
 		select {
@@ -157,7 +164,10 @@ func (pw *ProgressWriter) spin(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
 			pw.stateMutex.Lock()
 			pw.spinnerIdx = (pw.spinnerIdx + 1) % len(spinnerFrames)
 			pw.stateMutex.Unlock()

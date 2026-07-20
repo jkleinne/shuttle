@@ -22,6 +22,7 @@ const (
 	rsyncOutFormatFlag    = "--out-format=%i %n%L"
 	rcloneUseJSONLogFlag  = "--use-json-log"
 	transferStatsFlag     = "--stats"
+	logFileFlag           = "--log-file"
 )
 
 var rsyncInstrumentationFlags = []string{
@@ -45,7 +46,7 @@ var rcloneInstrumentationKeys = []string{
 	transferStatsFlag,
 	rcloneUseJSONLogFlag,
 	"--log-level",
-	"--log-file",
+	logFileFlag,
 }
 
 // RsyncArgsRequest carries the inputs for one rsync argument assembly.

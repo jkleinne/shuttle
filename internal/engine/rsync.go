@@ -75,6 +75,30 @@ func isRsyncByteCounter(value string) bool {
 	return isRsyncGroupedInteger(value) || isRsyncHumanReadableNumber(value)
 }
 
+type rsyncProgressFields struct {
+	percentage string
+	speed      string
+	eta        string
+	hasMarker  bool
+}
+
+func collectRsyncProgressFields(fields []string) rsyncProgressFields {
+	var result rsyncProgressFields
+	for _, field := range fields {
+		switch {
+		case strings.HasPrefix(field, "(xfr#"):
+			result.hasMarker = true
+		case strings.HasSuffix(field, "%"):
+			result.percentage = field
+		case strings.Contains(field, "/s"):
+			result.speed = field
+		case len(field) > 2 && field[0] != '(' && strings.Contains(field, ":"):
+			result.eta = field
+		}
+	}
+	return result
+}
+
 // parseRsyncProgress extracts a progress string from an rsync --info=progress2
 // output segment. Returns empty string if the segment is not a progress line.
 //
@@ -89,32 +113,14 @@ func parseRsyncProgress(segment string) string {
 		return ""
 	}
 
-	var pct, speed, eta string
-	isProgressRecord := false
-	for _, f := range fields {
-		switch {
-		case strings.HasPrefix(f, "(xfr#"):
-			isProgressRecord = true
-		case strings.HasSuffix(f, "%"):
-			pct = f
-		case strings.Contains(f, "/s"):
-			speed = f
-		case len(f) > 2 && f[0] != '(' && strings.Contains(f, ":"):
-			eta = f
-		}
-	}
-
-	if pct == "" || !isProgressRecord {
+	progress := collectRsyncProgressFields(fields)
+	if progress.percentage == "" || progress.speed == "" || progress.eta == "" || !progress.hasMarker {
 		return ""
 	}
 
-	var parts []string
-	parts = append(parts, pct)
-	if speed != "" {
-		parts = append(parts, speed)
-	}
-	if eta != "" && eta != "0:00:00" {
-		parts = append(parts, eta+" remaining")
+	parts := []string{progress.percentage, progress.speed}
+	if progress.eta != "0:00:00" {
+		parts = append(parts, progress.eta+" remaining")
 	}
 	return strings.Join(parts, ", ")
 }
@@ -122,9 +128,9 @@ func parseRsyncProgress(segment string) string {
 // scanRsyncProgress drains bounded records for focused progress tests. The
 // executor uses the same capture primitive and adds trusted tool framing.
 func scanRsyncProgress(r io.Reader, capture io.Writer, onProgress func(string)) {
-	_ = captureDelimitedRecords(r, func(record string) {
+	_ = captureDelimitedRecordsWithOrigin(r, func(record string, isProgressRepaint bool) {
 		_, _ = io.WriteString(capture, record+"\n")
-		if onProgress != nil {
+		if isProgressRepaint && onProgress != nil {
 			if progress := parseRsyncProgress(record); progress != "" {
 				onProgress(progress)
 			}
@@ -135,16 +141,23 @@ func scanRsyncProgress(r io.Reader, capture io.Writer, onProgress func(string)) 
 func (e *RsyncExecutor) captureStdoutRecord(
 	record string,
 	statsTail *tailBuffer,
+) {
+	_, _ = io.WriteString(statsTail, record+"\n")
+	e.logger.FileTool(log.ToolRsync, record)
+}
+
+func (e *RsyncExecutor) captureProgressRecord(
+	record string,
+	statsTail *tailBuffer,
 	onProgress func(string),
 ) {
 	_, _ = io.WriteString(statsTail, record+"\n")
+	e.logger.FileTool(log.ToolRsync, record)
 	if progress := parseRsyncProgress(record); progress != "" {
 		if onProgress != nil {
 			onProgress(progress)
 		}
-		return
 	}
-	e.logger.FileTool("rsync", record)
 }
 
 func (e *RsyncExecutor) drainOutput(
@@ -157,14 +170,21 @@ func (e *RsyncExecutor) drainOutput(
 	pipeWg.Add(2)
 	go func() {
 		defer pipeWg.Done()
-		stdoutReadErr = captureDelimitedRecords(stdout, func(record string) {
-			e.captureStdoutRecord(record, capture, onProgress)
-		})
+		stdoutReadErr = captureDelimitedRecordsWithOrigin(
+			stdout,
+			func(record string, isProgressRepaint bool) {
+				if isProgressRepaint {
+					e.captureProgressRecord(record, capture, onProgress)
+					return
+				}
+				e.captureStdoutRecord(record, capture)
+			},
+		)
 	}()
 	go func() {
 		defer pipeWg.Done()
 		stderrReadErr = captureDelimitedRecords(stderr, func(record string) {
-			e.logger.FileTool("rsync", record)
+			e.logger.FileTool(log.ToolRsync, record)
 		})
 	}()
 	pipeWg.Wait()

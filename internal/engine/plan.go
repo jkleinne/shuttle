@@ -59,6 +59,12 @@ func BuildRunPlan(cfg *config.Config, options RunOptions) (RunPlan, error) {
 	if cfg == nil {
 		return RunPlan{}, fmt.Errorf("building run plan: config is nil: %w", ErrInvalidRunPlan)
 	}
+	if err := ValidateJobNames(options.SkipJobs, options.OnlyJobs, cfg.JobNames()); err != nil {
+		return RunPlan{}, fmt.Errorf("building run plan: %w", err)
+	}
+	if err := validateRemoteNames(options.SelectedRemotes, cfg.AllRemoteNames()); err != nil {
+		return RunPlan{}, fmt.Errorf("building run plan: %w", err)
+	}
 
 	plan := RunPlan{
 		dryRun: options.DryRun,
@@ -183,6 +189,22 @@ func ValidateJobNames(skip, only, jobNames []string) error {
 	for _, name := range only {
 		if !valid[name] {
 			return fmt.Errorf("unknown job %q in --only; valid names: %v", name, sortedKeys(valid))
+		}
+	}
+	return nil
+}
+
+func validateRemoteNames(selected, configured []string) error {
+	if len(selected) == 0 {
+		return nil
+	}
+	valid := make(map[string]bool, len(configured))
+	for _, remote := range configured {
+		valid[remote] = true
+	}
+	for _, remote := range selected {
+		if !valid[remote] {
+			return fmt.Errorf("unknown remote %q; configured: %v", remote, configured)
 		}
 	}
 	return nil

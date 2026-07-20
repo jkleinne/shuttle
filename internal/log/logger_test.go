@@ -46,7 +46,7 @@ func TestLogger_WritesToBothStreams(t *testing.T) {
 }
 
 func TestLogger_SanitizesMessageText(t *testing.T) {
-	const hostile = "trusted\nforged\x1b]0;title\a\u009b31m\x7f"
+	const hostile = "trusted\nforged\x1b]0;title\a\u009b31m\x7f\u061c\u200e\u202e\u2066\u2069"
 	const sanitized = "trustedforged]0;title31m"
 	tests := []struct {
 		name         string
@@ -155,7 +155,18 @@ func TestLogger_SanitizesMessageText(t *testing.T) {
 			if got := strings.Count(fileOutput, "\n"); got != 1 {
 				t.Errorf("file newline count = %d, want exactly 1; output: %q", got, fileOutput)
 			}
-			for _, control := range []string{"\nforged", "\x1b", "\a", "\u009b", "\x7f"} {
+			for _, control := range []string{
+				"\nforged",
+				"\x1b",
+				"\a",
+				"\u009b",
+				"\x7f",
+				"\u061c",
+				"\u200e",
+				"\u202e",
+				"\u2066",
+				"\u2069",
+			} {
 				if strings.Contains(terminalOutput, control) || strings.Contains(fileOutput, control) {
 					t.Errorf("output retains hostile control %q: terminal=%q file=%q", control, terminalOutput, fileOutput)
 				}
@@ -172,28 +183,35 @@ func TestLogger_FileTool_SanitizesAndSerializesConcurrentRecords(t *testing.T) {
 	}
 
 	const recordsPerSource = 100
+	sources := []struct {
+		identity log.ToolSource
+		name     string
+	}{
+		{identity: log.ToolRsync, name: "rsync"},
+		{identity: log.ToolRclone, name: "rclone"},
+	}
 	expected := make(map[string]bool, recordsPerSource*2)
-	for _, source := range []string{"rsync", "rclone"} {
+	for _, source := range sources {
 		for sequence := range recordsPerSource {
 			record := fmt.Sprintf(
 				"[%s] record-%s-%03dforged",
-				strings.ToUpper(source),
-				source,
+				strings.ToUpper(source.name),
+				source.name,
 				sequence,
 			)
 			expected[record] = true
 		}
 	}
 	var writers sync.WaitGroup
-	for _, source := range []string{"rsync", "rclone"} {
+	for _, source := range sources {
 		source := source
 		writers.Add(1)
 		go func() {
 			defer writers.Done()
 			for sequence := range recordsPerSource {
 				logger.FileTool(
-					source,
-					fmt.Sprintf("record-%s-%03d\nforged\x1b\u009b\x7f", source, sequence),
+					source.identity,
+					fmt.Sprintf("record-%s-%03d\nforged\x1b\u009b\x7f", source.name, sequence),
 				)
 			}
 		}()
@@ -238,8 +256,8 @@ func TestLogger_FileTool_UnexpectedSourceUsesTrustedErrorFrame(t *testing.T) {
 		t.Fatalf("NewWithWriter: %v", err)
 	}
 
-	logger.FileTool("other", "unknown\nrecord\x1b")
-	logger.FileTool("rsync\nforged", "mutated\nrecord\u009b\x7f")
+	logger.FileTool(log.ToolSource(0), "unknown\nrecord\x1b")
+	logger.FileTool(log.ToolSource(255), "mutated\nrecord\u009b\x7f")
 	logger.Close()
 
 	content, err := os.ReadFile(logFile)
@@ -251,13 +269,13 @@ func TestLogger_FileTool_UnexpectedSourceUsesTrustedErrorFrame(t *testing.T) {
 		t.Fatalf("line count = %d, want %d", got, want)
 	}
 	frame := regexp.MustCompile(
-		`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ERROR\] unexpected tool source "(?:other|rsyncforged)": (?:unknownrecord|mutatedrecord)$`,
+		`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ERROR\] unexpected tool source (?:0|255): (?:unknownrecord|mutatedrecord)$`,
 	)
 	for lineNumber, line := range lines {
 		if !frame.MatchString(line) {
 			t.Errorf("line %d is not a trusted fallback frame: %q", lineNumber+1, line)
 		}
-		for _, forbidden := range []string{"[OTHER]", "[RSYNCFORGED]"} {
+		for _, forbidden := range []string{"[0]", "[255]"} {
 			if strings.Contains(line, forbidden) {
 				t.Errorf("line %d contains dynamic tool frame %q: %q", lineNumber+1, forbidden, line)
 			}
@@ -516,7 +534,7 @@ func TestLogDirectory_NonDirectoryHasContext(t *testing.T) {
 func TestLogDirectory_RejectsSymlinkBeforeMutation(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "target")
-	if err := os.Mkdir(target, 0o700); err != nil {
+	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatalf("creating symlink target: %v", err)
 	}
 	logDir := filepath.Join(parent, "logs")
@@ -543,6 +561,13 @@ func TestLogDirectory_RejectsSymlinkBeforeMutation(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("symlink target mutated, entries = %v", entries)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("checking symlink target mode: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("symlink target mode = %o, want unchanged 755", got)
 	}
 }
 

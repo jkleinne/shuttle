@@ -485,6 +485,16 @@ func TestRcloneExec_HostileFilenameTransfersWithTrustedLogFrames(t *testing.T) {
 		}
 	}
 	logged := assertPrimaryLogFrames(t, logPath, "RCLONE")
+	for _, want := range []string{
+		"trusted",
+		"Deleted: 999",
+		"Checks: 888",
+		"Transferred: 777",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("primary log missing hostile filename record fragment %q: %q", want, logged)
+		}
+	}
 	if strings.Contains(logged, "\x1b") || strings.Contains(logged, "\u009b") || strings.Contains(logged, "\x7f") {
 		t.Errorf("primary log retains hostile controls: %q", logged)
 	}
@@ -617,7 +627,24 @@ func TestCleanupArchives_ZeroRetention_Skips(t *testing.T) {
 	}
 }
 
-func TestPurgeExpiredArchiveDirectories_PurgesBeforeLaterScanError(t *testing.T) {
+func TestPrepareArchiveCleanup_UsesProvidedTime(t *testing.T) {
+	now := time.Date(2026, time.July, 19, 23, 59, 59, 0, time.FixedZone("test", -5*60*60))
+
+	plan, shouldRun := prepareArchiveCleanup(ArchiveCleanupRequest{
+		RemoteName:    "remote",
+		BackupPath:    "archives",
+		RetentionDays: 30,
+	}, now)
+
+	if !shouldRun {
+		t.Fatal("prepareArchiveCleanup() shouldRun = false, want true")
+	}
+	if plan.cutoff != "2026-06-19" {
+		t.Errorf("cutoff = %q, want %q from injected time", plan.cutoff, "2026-06-19")
+	}
+}
+
+func TestPurgeExpiredArchiveDirectories_ValidatesListingBeforePurging(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
 	const (
 		expiredDirectory = "2020-01-01_000000"
@@ -648,11 +675,32 @@ func TestPurgeExpiredArchiveDirectories_PurgesBeforeLaterScanError(t *testing.T)
 	if !strings.Contains(err.Error(), "scanning archive listing for "+archiveRoot) {
 		t.Errorf("error = %q, want archive listing context", err)
 	}
-	if len(purgedTargets) != 1 {
-		t.Fatalf("purged targets = %v, want one purge before the scan error", purgedTargets)
+	if len(purgedTargets) != 0 {
+		t.Errorf("purged targets = %v, want no mutation before complete validation", purgedTargets)
 	}
-	if want := archiveRoot + "/" + expiredDirectory; purgedTargets[0] != want {
-		t.Errorf("purged target = %q, want %q", purgedTargets[0], want)
+}
+
+func TestDrainArchiveListing_RejectsOversizedStdout(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	const listingLimit = 4 * 1024 * 1024
+	stdout := strings.NewReader(strings.Repeat("x", listingLimit+1))
+
+	listing, _, stdoutReadErr, stderrReadErr := executor.drainArchiveListing(
+		stdout,
+		strings.NewReader(""),
+	)
+
+	if stdoutReadErr == nil {
+		t.Fatal("drainArchiveListing() stdout error = nil, want size limit error")
+	}
+	if !strings.Contains(stdoutReadErr.Error(), "exceeds") {
+		t.Errorf("stdout error = %q, want size limit context", stdoutReadErr)
+	}
+	if stderrReadErr != nil {
+		t.Errorf("stderr error = %v, want nil", stderrReadErr)
+	}
+	if len(listing) > listingLimit {
+		t.Errorf("retained listing bytes = %d, want at most %d", len(listing), listingLimit)
 	}
 }
 

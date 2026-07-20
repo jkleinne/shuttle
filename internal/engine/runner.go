@@ -66,6 +66,8 @@ type PrerequisiteChecker interface {
 type RunLocker interface {
 	// Acquire prevents concurrent runs from sharing one absolute configuration identity.
 	Acquire(string) error
+	// Release ends the lock lifecycle after the run stops using shared resources.
+	Release() error
 }
 
 // RcloneCommandExecutor keeps rclone process and archive-cleanup I/O outside orchestration.
@@ -226,13 +228,18 @@ func formatExec(tool string, args []string) string {
 
 // Run executes the full pipeline: prerequisites, lock, jobs, summary.
 // Partial failures are recorded in the summary but do not stop subsequent jobs.
-func (r *Runner) Run(ctx context.Context) (Summary, error) {
+func (r *Runner) Run(ctx context.Context) (summary Summary, runErr error) {
 	if err := r.checkPrerequisites(); err != nil {
 		return Summary{}, fmt.Errorf("prerequisites: %w", err)
 	}
 	if err := r.locker.Acquire(r.configPath); err != nil {
 		return Summary{}, err
 	}
+	defer func() {
+		if err := r.locker.Release(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("releasing run lock: %w", err))
+		}
+	}()
 
 	start := time.Now()
 	timestamp := start.Format("2006-01-02_150405")

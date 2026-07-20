@@ -13,10 +13,29 @@ const (
 // from reader. Each record retains at most outputRecordLimitBytes, but the
 // reader continues draining through the delimiter and EOF.
 func captureDelimitedRecords(reader io.Reader, onRecord func(string)) error {
+	return captureDelimitedRecordsWithOrigin(
+		reader,
+		func(record string, _ bool) {
+			if onRecord != nil {
+				onRecord(record)
+			}
+		},
+	)
+}
+
+// captureDelimitedRecordsWithOrigin additionally reports whether a record
+// began immediately after a standalone carriage return. Rsync uses that
+// framing for progress repaint records, while newline framed records can be
+// user controlled filenames.
+func captureDelimitedRecordsWithOrigin(
+	reader io.Reader,
+	onRecord func(string, bool),
+) error {
 	readBuffer := make([]byte, outputReadBufferBytes)
 	record := make([]byte, 0, outputReadBufferBytes)
 	truncated := false
 	previousWasCR := false
+	startedAfterCarriageReturn := false
 
 	flush := func() {
 		if len(record) == 0 && !truncated {
@@ -27,7 +46,7 @@ func captureDelimitedRecords(reader io.Reader, onRecord func(string)) error {
 			if truncated {
 				text += outputTruncationSuffix
 			}
-			onRecord(text)
+			onRecord(text, startedAfterCarriageReturn)
 		}
 		record = record[:0]
 		truncated = false
@@ -39,6 +58,7 @@ func captureDelimitedRecords(reader io.Reader, onRecord func(string)) error {
 			if previousWasCR {
 				previousWasCR = false
 				if value == '\n' {
+					startedAfterCarriageReturn = false
 					continue
 				}
 			}
@@ -46,8 +66,10 @@ func captureDelimitedRecords(reader io.Reader, onRecord func(string)) error {
 			case '\r':
 				flush()
 				previousWasCR = true
+				startedAfterCarriageReturn = true
 			case '\n':
 				flush()
+				startedAfterCarriageReturn = false
 			default:
 				if len(record) < outputRecordLimitBytes {
 					record = append(record, value)

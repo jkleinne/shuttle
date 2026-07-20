@@ -22,6 +22,7 @@ import (
 const (
 	rcloneCommandName               = "rclone"
 	rcloneConfigPasswordEnvironment = "RCLONE_CONFIG_PASS"
+	archiveListingLimitBytes        = 4 * 1024 * 1024
 )
 
 // RcloneExecutor wraps rclone execution via os/exec. It receives pre-assembled
@@ -204,7 +205,7 @@ func (e *RcloneExecutor) captureStdoutRecord(
 		return
 	}
 	if trimmed[0] == '{' {
-		e.logger.FileTool("rclone", trimmed)
+		e.logger.FileTool(log.ToolRclone, trimmed)
 		return
 	}
 	if marker := rcloneStatisticsMarkerAtRecordStart(trimmed); marker != "" {
@@ -220,12 +221,12 @@ func (e *RcloneExecutor) captureStdoutRecord(
 
 	position := strings.LastIndex(trimmed, "Transferred:")
 	if position <= 0 {
-		e.logger.FileTool("rclone", trimmed)
+		e.logger.FileTool(log.ToolRclone, trimmed)
 		return
 	}
 	progressRecord := trimmed[position:]
 	if !strings.Contains(progressRecord, "/s") {
-		e.logger.FileTool("rclone", trimmed)
+		e.logger.FileTool(log.ToolRclone, trimmed)
 		return
 	}
 	if onProgress == nil {
@@ -299,7 +300,7 @@ func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress fun
 			if firstStderr == "" {
 				firstStderr = record
 			}
-			e.logger.FileTool("rclone", record)
+			e.logger.FileTool(log.ToolRclone, record)
 		})
 	}()
 	drains.Wait()
@@ -409,7 +410,7 @@ func (e *RcloneExecutor) captureToolRecords(
 		if firstRecord != nil && *firstRecord == "" {
 			*firstRecord = record
 		}
-		e.logger.FileTool("rclone", record)
+		e.logger.FileTool(log.ToolRclone, record)
 	})
 }
 
@@ -468,7 +469,7 @@ func (e *RcloneExecutor) purgeArchiveDir(ctx context.Context, target string) err
 // expected first-run state and stays a non-error. Skipped during dry-run,
 // when the backup path is empty, or when retention is non-positive.
 func (e *RcloneExecutor) CleanupArchives(ctx context.Context, request ArchiveCleanupRequest) error {
-	plan, shouldRun := prepareArchiveCleanup(request)
+	plan, shouldRun := prepareArchiveCleanup(request, e.now())
 	if !shouldRun {
 		return nil
 	}
@@ -489,14 +490,17 @@ type archiveCleanupPlan struct {
 	cutoff      string
 }
 
-func prepareArchiveCleanup(request ArchiveCleanupRequest) (archiveCleanupPlan, bool) {
+func prepareArchiveCleanup(
+	request ArchiveCleanupRequest,
+	now time.Time,
+) (archiveCleanupPlan, bool) {
 	if request.BackupPath == "" || request.RetentionDays <= 0 || request.DryRun {
 		return archiveCleanupPlan{}, false
 	}
 	return archiveCleanupPlan{
 		remoteName:  request.RemoteName,
 		archiveRoot: fmt.Sprintf("%s:%s", request.RemoteName, strings.TrimRight(request.BackupPath, "/")),
-		cutoff:      time.Now().AddDate(0, 0, -request.RetentionDays).Format(archiveDateLayout),
+		cutoff:      now.AddDate(0, 0, -request.RetentionDays).Format(archiveDateLayout),
 	}, true
 }
 
@@ -504,19 +508,71 @@ func (e *RcloneExecutor) drainArchiveListing(
 	stdout io.Reader,
 	stderr io.Reader,
 ) (listing []byte, firstStderr string, stdoutReadErr, stderrReadErr error) {
-	var output bytes.Buffer
 	var drains sync.WaitGroup
 	drains.Add(2)
 	go func() {
 		defer drains.Done()
-		_, stdoutReadErr = io.Copy(&output, stdout)
+		limited := io.LimitReader(stdout, archiveListingLimitBytes+1)
+		listing, stdoutReadErr = io.ReadAll(limited)
+		if len(listing) <= archiveListingLimitBytes {
+			return
+		}
+		listing = listing[:archiveListingLimitBytes]
+		_, drainErr := io.Copy(io.Discard, stdout)
+		stdoutReadErr = errors.Join(
+			stdoutReadErr,
+			drainErr,
+			fmt.Errorf(
+				"archive listing exceeds %d byte limit",
+				archiveListingLimitBytes,
+			),
+		)
 	}()
 	go func() {
 		defer drains.Done()
 		stderrReadErr = e.captureToolRecords(stderr, &firstStderr)
 	}()
 	drains.Wait()
-	return output.Bytes(), firstStderr, stdoutReadErr, stderrReadErr
+	return listing, firstStderr, stdoutReadErr, stderrReadErr
+}
+
+func (e *RcloneExecutor) archiveListingReadError(
+	plan archiveCleanupPlan,
+	stdoutReadErr error,
+	stderrReadErr error,
+) error {
+	var readErrors []error
+	if stdoutReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading archive listing stdout for %s: %v",
+			plan.archiveRoot,
+			stdoutReadErr,
+		))
+		readErrors = append(
+			readErrors,
+			fmt.Errorf(
+				"reading archive listing stdout for %s: %w",
+				plan.archiveRoot,
+				stdoutReadErr,
+			),
+		)
+	}
+	if stderrReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading archive listing stderr for %s: %v",
+			plan.archiveRoot,
+			stderrReadErr,
+		))
+		readErrors = append(
+			readErrors,
+			fmt.Errorf(
+				"reading archive listing stderr for %s: %w",
+				plan.archiveRoot,
+				stderrReadErr,
+			),
+		)
+	}
+	return errors.Join(readErrors...)
 }
 
 func (e *RcloneExecutor) readArchiveDirectoryListing(
@@ -539,21 +595,7 @@ func (e *RcloneExecutor) readArchiveDirectoryListing(
 
 	listing, firstStderr, stdoutReadErr, stderrReadErr := e.drainArchiveListing(stdout, stderr)
 	processErr := command.Wait()
-
-	if stdoutReadErr != nil {
-		e.logger.FileError(fmt.Sprintf(
-			"reading archive listing stdout for %s: %v",
-			plan.archiveRoot,
-			stdoutReadErr,
-		))
-	}
-	if stderrReadErr != nil {
-		e.logger.FileError(fmt.Sprintf(
-			"reading archive listing stderr for %s: %v",
-			plan.archiveRoot,
-			stderrReadErr,
-		))
-	}
+	readErr := e.archiveListingReadError(plan, stdoutReadErr, stderrReadErr)
 	if processErr != nil {
 		if isDirNotFound(processErr) {
 			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", plan.remoteName))
@@ -569,6 +611,9 @@ func (e *RcloneExecutor) readArchiveDirectoryListing(
 		}
 		return nil, fmt.Errorf("listing archive root %s: %w", plan.archiveRoot, processErr)
 	}
+	if readErr != nil {
+		return nil, readErr
+	}
 	return listing, nil
 }
 
@@ -582,7 +627,11 @@ func (e *RcloneExecutor) purgeExpiredArchiveDirectories(
 	ctx context.Context,
 	request archivePurgeRequest,
 ) error {
-	purged := 0
+	type expiredArchiveDirectory struct {
+		name   string
+		target string
+	}
+	var expiredDirectories []expiredArchiveDirectory
 	scanner := bufio.NewScanner(request.listing)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -602,21 +651,28 @@ func (e *RcloneExecutor) purgeExpiredArchiveDirectories(
 		if !expired {
 			continue
 		}
-		target := request.plan.archiveRoot + "/" + directory
-		e.logger.Info(fmt.Sprintf(
-			"purging expired archive: %s (%s < %s)",
-			target,
-			directory[:len(archiveDateLayout)],
-			request.plan.cutoff,
-		))
-		if purgeErr := request.purge(ctx, target); purgeErr != nil {
-			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
-		} else {
-			purged++
-		}
+		expiredDirectories = append(expiredDirectories, expiredArchiveDirectory{
+			name:   directory,
+			target: request.plan.archiveRoot + "/" + directory,
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scanning archive listing for %s: %w", request.plan.archiveRoot, err)
+	}
+
+	purged := 0
+	for _, directory := range expiredDirectories {
+		e.logger.Info(fmt.Sprintf(
+			"purging expired archive: %s (%s < %s)",
+			directory.target,
+			directory.name[:len(archiveDateLayout)],
+			request.plan.cutoff,
+		))
+		if purgeErr := request.purge(ctx, directory.target); purgeErr != nil {
+			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", directory.target, purgeErr))
+		} else {
+			purged++
+		}
 	}
 	if purged > 0 {
 		e.logger.Info(fmt.Sprintf(

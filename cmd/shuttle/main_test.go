@@ -1156,7 +1156,7 @@ sources = ["/tmp"]
 destination = "/tmp/backup"
 `)
 	t.Setenv("PATH", t.TempDir())
-	cli := &cliFlags{ConfigPath: configPath, ColorMode: colorNever}
+	cli := &cliFlags{ConfigPath: configPath, ColorMode: colorAuto}
 	command := newDoctorCommand(cli)
 	var output bytes.Buffer
 	command.SetOut(&output)
@@ -1168,6 +1168,15 @@ destination = "/tmp/backup"
 	}
 	if !strings.Contains(output.String(), "shuttle doctor") {
 		t.Errorf("command output = %q, want doctor report", output.String())
+	}
+	if strings.Contains(output.String(), "\x1b") {
+		t.Errorf("redirected auto-color output contains ANSI controls: %q", output.String())
+	}
+}
+
+func TestWriterIsTerminal_BufferIsNonTerminal(t *testing.T) {
+	if writerIsTerminal(&bytes.Buffer{}) {
+		t.Fatal("writerIsTerminal(buffer) = true, want false")
 	}
 }
 

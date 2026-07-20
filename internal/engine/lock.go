@@ -31,7 +31,11 @@ func (l *FileRunLocker) Acquire(configPath string) error {
 		return errors.New("acquiring run lock: locker already holds a lock")
 	}
 
-	lockPath, err := lockFilePath(configPath)
+	configIdentity, err := canonicalConfigIdentity(configPath)
+	if err != nil {
+		return fmt.Errorf("resolving config identity: %w", err)
+	}
+	lockPath, err := lockFilePath(configIdentity)
 	if err != nil {
 		return fmt.Errorf("resolving lock path: %w", err)
 	}
@@ -53,6 +57,30 @@ func (l *FileRunLocker) Acquire(configPath string) error {
 	return nil
 }
 
+// Release unlocks and closes the descriptor held by a successful Acquire.
+func (l *FileRunLocker) Release() error {
+	if l.lockFile == nil {
+		return nil
+	}
+	lockFile := l.lockFile
+	l.lockFile = nil
+
+	var releaseErrors []error
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		releaseErrors = append(
+			releaseErrors,
+			fmt.Errorf("unlocking file %s: %w", lockFile.Name(), err),
+		)
+	}
+	if err := lockFile.Close(); err != nil {
+		releaseErrors = append(
+			releaseErrors,
+			fmt.Errorf("closing lock file %s: %w", lockFile.Name(), err),
+		)
+	}
+	return errors.Join(releaseErrors...)
+}
+
 func classifyRunLockError(lockPath string, cause error) error {
 	if errors.Is(cause, syscall.EWOULDBLOCK) {
 		return fmt.Errorf("another instance is already running (lock: %s): %w", lockPath, cause)
@@ -71,12 +99,29 @@ func closeUnacquiredLockFile(lockFile *os.File, acquisitionError error) error {
 }
 
 func lockFilePath(configPath string) (string, error) {
+	if !filepath.IsAbs(configPath) {
+		return "", fmt.Errorf("config path %q is not absolute", configPath)
+	}
 	directory, err := lockDirectory()
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.Sum256([]byte(configPath))
-	return filepath.Join(directory, fmt.Sprintf("shuttle-%x.lock", hash[:4])), nil
+	hash := sha256.Sum256([]byte(filepath.Clean(configPath)))
+	return filepath.Join(directory, fmt.Sprintf("shuttle-%x.lock", hash[:])), nil
+}
+
+func canonicalConfigIdentity(configPath string) (string, error) {
+	if !filepath.IsAbs(configPath) {
+		return "", fmt.Errorf("config path %q is not absolute", configPath)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(configPath))
+	if err != nil {
+		return "", fmt.Errorf("resolving config path %s: %w", configPath, err)
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("resolved config path %q is not absolute", resolved)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func lockDirectory() (string, error) {
@@ -92,20 +137,114 @@ func lockDirectory() (string, error) {
 		}
 		directory = filepath.Join(temporaryDirectory, fmt.Sprintf("shuttle-%d", os.Getuid()))
 	}
+	canonicalDirectory, err := canonicalLockDirectoryPath(directory)
+	if err != nil {
+		return "", err
+	}
+	directory = canonicalDirectory
 	if err := ensureSecureLockDirectory(directory); err != nil {
 		return "", err
 	}
 	return directory, nil
 }
 
-func ensureSecureLockDirectory(directory string) error {
+func canonicalLockDirectoryPath(directory string) (string, error) {
 	info, err := os.Lstat(directory)
-	if errors.Is(err, fs.ErrNotExist) {
-		if err := os.Mkdir(directory, lockDirectoryPermissions); err != nil {
-			return fmt.Errorf("creating lock directory %s: %w", directory, err)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("lock directory %s is a symlink", directory)
 		}
-		info, err = os.Lstat(directory)
+		resolved, resolveErr := filepath.EvalSymlinks(directory)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolving lock directory %s: %w", directory, resolveErr)
+		}
+		return resolved, nil
+	case errors.Is(err, fs.ErrNotExist):
+		parent, resolveErr := filepath.EvalSymlinks(filepath.Dir(directory))
+		if resolveErr != nil {
+			return "", fmt.Errorf(
+				"resolving lock directory parent %s: %w",
+				filepath.Dir(directory),
+				resolveErr,
+			)
+		}
+		return filepath.Join(parent, filepath.Base(directory)), nil
+	default:
+		return "", fmt.Errorf("checking lock directory %s: %w", directory, err)
 	}
+}
+
+func ensureSecureLockDirectory(directory string) error {
+	canonicalDirectory, err := canonicalLockDirectoryPath(directory)
+	if err != nil {
+		return err
+	}
+	directory = canonicalDirectory
+
+	_, err = os.Lstat(directory)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := validateSecureLockDirectoryAncestors(filepath.Dir(directory)); err != nil {
+			return err
+		}
+		if mkdirErr := os.Mkdir(directory, lockDirectoryPermissions); mkdirErr != nil &&
+			!errors.Is(mkdirErr, fs.ErrExist) {
+			return fmt.Errorf("creating lock directory %s: %w", directory, mkdirErr)
+		}
+		_, err = os.Lstat(directory)
+	}
+	if err != nil {
+		return fmt.Errorf("checking lock directory %s: %w", directory, err)
+	}
+	return validateSecureLockDirectory(directory)
+}
+
+func validateSecureLockDirectoryAncestors(directory string) error {
+	cleanDirectory := filepath.Clean(directory)
+	if !filepath.IsAbs(cleanDirectory) {
+		return fmt.Errorf("lock directory %q is not absolute", directory)
+	}
+
+	var chain []string
+	for current := cleanDirectory; ; current = filepath.Dir(current) {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+
+	for index := len(chain) - 1; index >= 0; index-- {
+		path := chain[index]
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("checking lock directory path %s: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("lock directory path %s is a symlink", path)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("lock directory path %s is not a directory", path)
+		}
+		if err := validateTrustedDirectoryOwner(info, path); err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+			return fmt.Errorf(
+				"unsafe writable lock directory ancestor %s has permissions %o without sticky bit",
+				path,
+				info.Mode().Perm(),
+			)
+		}
+	}
+	return nil
+}
+
+func validateSecureLockDirectory(directory string) error {
+	if err := validateSecureLockDirectoryAncestors(filepath.Dir(directory)); err != nil {
+		return err
+	}
+	info, err := os.Lstat(directory)
 	if err != nil {
 		return fmt.Errorf("checking lock directory %s: %w", directory, err)
 	}
@@ -114,6 +253,9 @@ func ensureSecureLockDirectory(directory string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("lock directory %s is not a directory", directory)
+	}
+	if err := validateTrustedDirectoryOwner(info, directory); err != nil {
+		return err
 	}
 	if info.Mode().Perm() != lockDirectoryPermissions {
 		return fmt.Errorf(
@@ -124,6 +266,18 @@ func ensureSecureLockDirectory(directory string) error {
 		)
 	}
 	return validateCurrentUserOwnership(info, directory, "lock directory")
+}
+
+func validateTrustedDirectoryOwner(info os.FileInfo, path string) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("lock directory path %s has unsupported ownership metadata", path)
+	}
+	uid := int(stat.Uid)
+	if uid != 0 && uid != os.Getuid() {
+		return fmt.Errorf("unsafe lock directory ancestor %s is not owned by root or current user", path)
+	}
+	return nil
 }
 
 func validateLockFile(lockFile *os.File, lockPath string) error {

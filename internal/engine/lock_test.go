@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,8 +16,12 @@ func xdgRuntimeDir(t *testing.T) string {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatalf("chmod runtime dir: %v", err)
 	}
-	t.Setenv("XDG_RUNTIME_DIR", directory)
-	return directory
+	canonicalDirectory, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatalf("resolving runtime dir: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", canonicalDirectory)
+	return canonicalDirectory
 }
 
 func changeWorkingDirectory(t *testing.T, directory string) {
@@ -60,6 +65,75 @@ func TestLockFilePath_DifferentConfigs(t *testing.T) {
 	wantPrefix := filepath.Join(runtimeDirectory, "shuttle-")
 	if !strings.HasPrefix(firstPath, wantPrefix) {
 		t.Errorf("lock path should start with %q, got %q", wantPrefix, firstPath)
+	}
+}
+
+func TestLockFilePath_CanonicalAliasesShareIdentity(t *testing.T) {
+	xdgRuntimeDir(t)
+	configDirectory := t.TempDir()
+	configPath := filepath.Join(configDirectory, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+	symlinkPath := filepath.Join(t.TempDir(), "config-link.toml")
+	if err := os.Symlink(configPath, symlinkPath); err != nil {
+		t.Fatalf("creating config symlink: %v", err)
+	}
+
+	directIdentity, err := canonicalConfigIdentity(configPath)
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity direct config: %v", err)
+	}
+	direct, err := lockFilePath(directIdentity)
+	if err != nil {
+		t.Fatalf("lockFilePath direct config: %v", err)
+	}
+	dottedIdentity, err := canonicalConfigIdentity(filepath.Join(configDirectory, ".", "config.toml"))
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity dotted config: %v", err)
+	}
+	dotted, err := lockFilePath(dottedIdentity)
+	if err != nil {
+		t.Fatalf("lockFilePath dotted config: %v", err)
+	}
+	symlinkedIdentity, err := canonicalConfigIdentity(symlinkPath)
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity symlinked config: %v", err)
+	}
+	symlinked, err := lockFilePath(symlinkedIdentity)
+	if err != nil {
+		t.Fatalf("lockFilePath symlinked config: %v", err)
+	}
+
+	if direct != dotted || direct != symlinked {
+		t.Errorf(
+			"canonical aliases produced different lock paths: direct=%q dotted=%q symlink=%q",
+			direct,
+			dotted,
+			symlinked,
+		)
+	}
+}
+
+func TestLockFilePath_UsesFullSHA256Digest(t *testing.T) {
+	xdgRuntimeDir(t)
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+
+	configIdentity, err := canonicalConfigIdentity(configPath)
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity: %v", err)
+	}
+	lockPath, err := lockFilePath(configIdentity)
+	if err != nil {
+		t.Fatalf("lockFilePath: %v", err)
+	}
+	name := filepath.Base(lockPath)
+	const wantLength = len("shuttle-") + sha256.Size*2 + len(".lock")
+	if len(name) != wantLength {
+		t.Errorf("lock filename length = %d, want %d for full SHA256 digest: %q", len(name), wantLength, name)
 	}
 }
 
@@ -135,6 +209,32 @@ func TestLockDirectory_RejectsInsecureXDGRuntimeDir(t *testing.T) {
 	}
 }
 
+func TestLockDirectory_RejectsUnsafeWritableAncestor(t *testing.T) {
+	root := t.TempDir()
+	unsafeParent := filepath.Join(root, "unsafe")
+	if err := os.Mkdir(unsafeParent, 0o700); err != nil {
+		t.Fatalf("creating unsafe parent: %v", err)
+	}
+	if err := os.Chmod(unsafeParent, 0o777); err != nil {
+		t.Fatalf("making ancestor writable: %v", err)
+	}
+	runtimeDirectory := filepath.Join(unsafeParent, "runtime")
+	if err := os.Mkdir(runtimeDirectory, lockDirectoryPermissions); err != nil {
+		t.Fatalf("creating runtime directory: %v", err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDirectory)
+
+	_, err := lockDirectory()
+
+	if err == nil {
+		t.Fatal("lockDirectory() error = nil, want unsafe ancestor rejection")
+	}
+	if !strings.Contains(err.Error(), "unsafe") ||
+		!strings.Contains(err.Error(), "writable") {
+		t.Errorf("lockDirectory() error = %q, want unsafe writable ancestor context", err)
+	}
+}
+
 func TestLockDirectory_FallbackCreatesPrivateSubdir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	t.Setenv("TMPDIR", t.TempDir())
@@ -203,8 +303,15 @@ func TestEnsureSecureLockDirectory_RejectsInsecurePaths(t *testing.T) {
 
 func TestFileRunLocker_Acquire_RejectsSymlinkedLockPath(t *testing.T) {
 	xdgRuntimeDir(t)
-	configPath := "/some/config.toml"
-	lockPath, err := lockFilePath(configPath)
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+	configIdentity, err := canonicalConfigIdentity(configPath)
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity: %v", err)
+	}
+	lockPath, err := lockFilePath(configIdentity)
 	if err != nil {
 		t.Fatalf("lockFilePath: %v", err)
 	}
@@ -222,19 +329,24 @@ func TestFileRunLocker_Acquire_RejectsSymlinkedLockPath(t *testing.T) {
 
 func TestFileRunLocker_Acquire_CreatesPrivateLockFile(t *testing.T) {
 	xdgRuntimeDir(t)
-	configPath := "/some/config.toml"
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
 	locker := NewFileRunLocker()
 	t.Cleanup(func() {
-		if locker.lockFile != nil {
-			_ = locker.lockFile.Close()
-		}
+		_ = locker.Release()
 	})
 
 	if err := locker.Acquire(configPath); err != nil {
 		t.Fatalf("Acquire() error = %v", err)
 	}
 
-	lockPath, err := lockFilePath(configPath)
+	configIdentity, err := canonicalConfigIdentity(configPath)
+	if err != nil {
+		t.Fatalf("canonicalConfigIdentity: %v", err)
+	}
+	lockPath, err := lockFilePath(configIdentity)
 	if err != nil {
 		t.Fatalf("lockFilePath: %v", err)
 	}
@@ -244,6 +356,60 @@ func TestFileRunLocker_Acquire_CreatesPrivateLockFile(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("lock file perm = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestFileRunLocker_Acquire_ContendsAcrossCanonicalAliases(t *testing.T) {
+	xdgRuntimeDir(t)
+	configDirectory := t.TempDir()
+	configPath := filepath.Join(configDirectory, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+	symlinkPath := filepath.Join(t.TempDir(), "config-link.toml")
+	if err := os.Symlink(configPath, symlinkPath); err != nil {
+		t.Fatalf("creating config symlink: %v", err)
+	}
+	first := NewFileRunLocker()
+	second := NewFileRunLocker()
+	t.Cleanup(func() {
+		_ = first.Release()
+		_ = second.Release()
+	})
+
+	if err := first.Acquire(configPath); err != nil {
+		t.Fatalf("first Acquire() error = %v", err)
+	}
+	err := second.Acquire(symlinkPath)
+
+	if err == nil {
+		t.Fatal("second Acquire() error = nil, want lock contention")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("second Acquire() error = %q, want contention context", err)
+	}
+}
+
+func TestFileRunLocker_ReleaseAllowsReacquire(t *testing.T) {
+	xdgRuntimeDir(t)
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte("[defaults]\n"), 0o600); err != nil {
+		t.Fatalf("writing config fixture: %v", err)
+	}
+	first := NewFileRunLocker()
+	second := NewFileRunLocker()
+
+	if err := first.Acquire(configPath); err != nil {
+		t.Fatalf("first Acquire() error = %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("first Release() error = %v", err)
+	}
+	if err := second.Acquire(configPath); err != nil {
+		t.Fatalf("second Acquire() after release error = %v", err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatalf("second Release() error = %v", err)
 	}
 }
 

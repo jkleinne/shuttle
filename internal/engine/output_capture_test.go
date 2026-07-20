@@ -36,6 +36,41 @@ func TestCaptureDelimitedRecords_DelimitersAndEOFTail(t *testing.T) {
 	}
 }
 
+func TestCaptureDelimitedRecordsWithOrigin_StandaloneCarriageReturnMarksNextRecord(t *testing.T) {
+	type captured struct {
+		text                string
+		afterCarriageReturn bool
+	}
+	var records []captured
+
+	err := captureDelimitedRecordsWithOrigin(
+		strings.NewReader("file\n\rprogress\r\nnext"),
+		func(record string, afterCarriageReturn bool) {
+			records = append(records, captured{
+				text:                record,
+				afterCarriageReturn: afterCarriageReturn,
+			})
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("captureDelimitedRecordsWithOrigin() error = %v", err)
+	}
+	want := []captured{
+		{text: "file"},
+		{text: "progress", afterCarriageReturn: true},
+		{text: "next"},
+	}
+	if len(records) != len(want) {
+		t.Fatalf("records = %+v, want %+v", records, want)
+	}
+	for index := range want {
+		if records[index] != want[index] {
+			t.Errorf("record %d = %+v, want %+v", index, records[index], want[index])
+		}
+	}
+}
+
 func TestCaptureDelimitedRecords_OversizedRecordTruncatesAndContinuesDraining(t *testing.T) {
 	oversized := strings.Repeat("x", outputRecordLimitBytes+17)
 	input := oversized + "\nnormal\n"
