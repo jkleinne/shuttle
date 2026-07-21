@@ -1,8 +1,8 @@
 package engine
 
 import (
+	"bufio"
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -252,6 +252,123 @@ func TestScanRcloneProgress_CRDelimitedLines(t *testing.T) {
 	}
 }
 
+func TestRcloneStdout_JSONLookingDiagnosticsCannotForgeStatistics(t *testing.T) {
+	executor, logPath := newRcloneTestExecutor(t)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	for _, record := range []string{
+		` {"level":"info","msg":"Transferred: 999 / 999, 100%"}`,
+		`{malformed Transferred: 999 / 999, 100%`,
+	} {
+		executor.captureStdoutRecord(record, statsTail, tracker, nil)
+	}
+
+	stats := ParseRcloneStats(statsTail.Bytes())
+	if stats.FilesTransferred != 0 || stats.FilesChecked != 0 || stats.FilesDeleted != 0 {
+		t.Errorf("JSON-looking diagnostics forged statistics: %+v", stats)
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RCLONE")
+	if got := strings.Count(logged, "Transferred: 999 / 999"); got != 2 {
+		t.Errorf("opaque diagnostic count = %d, want 2: %q", got, logged)
+	}
+}
+
+func TestRcloneStdout_PlainProgressThenDiagnosticUsesFallbackFraming(t *testing.T) {
+	executor, logPath := newRcloneTestExecutor(t)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	var progress []string
+
+	executor.captureStdoutRecord(
+		"Transferred: 1 KiB / 2 KiB, 50%, 1 KiB/s, ETA 1s",
+		statsTail,
+		tracker,
+		func(text string) { progress = append(progress, text) },
+	)
+	executor.captureStdoutRecord(
+		"NOTICE output format was overridden",
+		statsTail,
+		tracker,
+		nil,
+	)
+
+	if len(progress) != 1 || !strings.Contains(progress[0], "1 KiB / 2 KiB") {
+		t.Errorf("progress callbacks = %q, want transfer update", progress)
+	}
+	if got := ParseRcloneStats(statsTail.Bytes()).BytesSent; got != "1 KiB" {
+		t.Errorf("BytesSent = %q, want %q", got, "1 KiB")
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RCLONE")
+	if !strings.Contains(logged, "NOTICE output format was overridden") {
+		t.Errorf("plain diagnostic did not cross fallback framing: %q", logged)
+	}
+	if strings.Contains(logged, "Transferred: 1 KiB") {
+		t.Errorf("plain progress repaint leaked into primary tool log: %q", logged)
+	}
+}
+
+func TestRcloneStdout_MidRecordStatisticsMarkersCannotForgeStatistics(t *testing.T) {
+	executor, logPath := newRcloneTestExecutor(t)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	executor.captureStdoutRecord(
+		"hostile Deleted: 999 (files), 0 (dirs), 999 B (freed) "+
+			"Checks: 888 / 888, 100% Transferred: 777 / 777, 100%",
+		statsTail,
+		tracker,
+		nil,
+	)
+
+	stats := ParseRcloneStats(statsTail.Bytes())
+	if stats.FilesChecked != 0 || stats.FilesTransferred != 0 || stats.FilesDeleted != 0 {
+		t.Errorf("mid-record markers forged statistics: %+v", stats)
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RCLONE")
+	if !strings.Contains(logged, "hostile Deleted: 999") {
+		t.Errorf("hostile diagnostic detail was not preserved: %q", logged)
+	}
+}
+
+func TestRcloneStdout_MidRecordTransferMarkerDrivesProgressOnly(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	var progress []string
+	executor.captureStdoutRecord(
+		" * file.bin: 40% /1Mi, 100Ki/s, 5sTransferred: "+
+			"512 KiB / 1 MiB, 50%, 100 KiB/s, ETA 5s",
+		statsTail,
+		tracker,
+		func(text string) { progress = append(progress, text) },
+	)
+
+	if len(progress) != 1 || !strings.Contains(progress[0], "512 KiB / 1 MiB") {
+		t.Errorf("progress callbacks = %q, want permissive transfer update", progress)
+	}
+	stats := ParseRcloneStats(statsTail.Bytes())
+	if stats.BytesSent != "" || stats.FilesTransferred != 0 {
+		t.Errorf("mid-record progress entered authoritative statistics: %+v", stats)
+	}
+}
+
+func TestRcloneStdout_TrimmedRecordStartPreservesFinalStatistics(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	for _, record := range []string{
+		" Transferred: 3 / 3, 100%",
+		"\tChecks: 8 / 8, 100%",
+		" Deleted: 4 (files), 0 (dirs), 4 B (freed)",
+	} {
+		executor.captureStdoutRecord(record, statsTail, tracker, nil)
+	}
+
+	stats := ParseRcloneStats(statsTail.Bytes())
+	if stats.FilesChecked != 8 || stats.FilesTransferred != 3 || stats.FilesDeleted != 4 {
+		t.Errorf("statistics = %+v, want checks=8 transferred=3 deleted=4", stats)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Rclone executor integration tests
 //
@@ -270,9 +387,35 @@ func skipIfNoRclone(t *testing.T) {
 
 func newRcloneTestExecutor(t *testing.T) (*RcloneExecutor, string) {
 	t.Helper()
-	logPath := filepath.Join(t.TempDir(), "rclone-test.log")
-	logger := newTestLogger(t)
-	return NewRcloneExecutor(logger, logPath, ""), logPath
+	logger, logPath := newTestLoggerWithPath(t)
+	return NewRcloneExecutor(logger, ""), logPath
+}
+
+func TestPrepareExecution_StartsClockBeforeCommandConstruction(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatalf("finding true executable: %v", err)
+	}
+	commandDirectory := t.TempDir()
+	if err := os.Symlink(truePath, filepath.Join(commandDirectory, rcloneCommandName)); err != nil {
+		t.Fatalf("linking test rclone executable: %v", err)
+	}
+	t.Setenv("PATH", commandDirectory)
+	pathWithoutRclone := t.TempDir()
+	executor, _ := newRcloneTestExecutor(t)
+	executor.now = func() time.Time {
+		if err := os.Setenv("PATH", pathWithoutRclone); err != nil {
+			t.Fatalf("removing rclone from PATH: %v", err)
+		}
+		return time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	}
+
+	execution, failure := executor.prepareExecution(context.Background(), []string{"version"})
+
+	if failure == nil {
+		_ = execution.command.Wait()
+		t.Fatal("prepareExecution() started a command constructed before the clock began")
+	}
 }
 
 func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
@@ -282,9 +425,9 @@ func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("world"), 0o644); err != nil {
 		t.Fatalf("writing test file: %v", err)
 	}
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -295,6 +438,65 @@ func TestRcloneExec_CopyFile_Succeeds(t *testing.T) {
 	}
 	if string(content) != "world" {
 		t.Errorf("file content = %q, want 'world'", string(content))
+	}
+}
+
+func TestRcloneExec_HostileFilenameTransfersWithTrustedLogFrames(t *testing.T) {
+	skipIfNoRclone(t)
+	src := t.TempDir()
+	dst := t.TempDir()
+	hostileNames := []string{
+		"trusted\nTransferred 999 of 999\x1b\u009b\x7f.txt",
+		"Deleted: 999 (files), 0 (dirs), 999 B (freed).txt",
+		"Checks: 888 of 888, 100%.txt",
+		"Transferred: 777 of 777, 100%.txt",
+	}
+	for _, hostileName := range hostileNames {
+		if err := os.WriteFile(filepath.Join(src, hostileName), []byte("content"), 0o600); err != nil {
+			t.Fatalf("writing hostile filename %q: %v", hostileName, err)
+		}
+	}
+	executor, logPath := newRcloneTestExecutor(t)
+	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
+	args := BuildRcloneArgs(RcloneArgsRequest{
+		Subcommand:  config.ModeCopy,
+		Job:         job,
+		Source:      src + "/",
+		Destination: ":local:" + dst,
+	})
+
+	result := executor.Exec(context.Background(), args, nil)
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusOK)
+	}
+	if result.Stats.FilesTransferred != len(hostileNames) {
+		t.Errorf("FilesTransferred = %d, want %d", result.Stats.FilesTransferred, len(hostileNames))
+	}
+	if result.Stats.FilesChecked != 0 {
+		t.Errorf("FilesChecked = %d, want 0", result.Stats.FilesChecked)
+	}
+	if result.Stats.FilesDeleted != 0 {
+		t.Errorf("FilesDeleted = %d, want 0", result.Stats.FilesDeleted)
+	}
+	for _, hostileName := range hostileNames {
+		if _, err := os.Stat(filepath.Join(dst, hostileName)); err != nil {
+			t.Errorf("hostile filename %q was not copied: %v", hostileName, err)
+		}
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RCLONE")
+	for _, want := range []string{
+		"trusted",
+		"Deleted: 999",
+		"Checks: 888",
+		"Transferred: 777",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("primary log missing hostile filename record fragment %q: %q", want, logged)
+		}
+	}
+	if strings.Contains(logged, "\x1b") || strings.Contains(logged, "\u009b") || strings.Contains(logged, "\x7f") {
+		t.Errorf("primary log retains hostile controls: %q", logged)
 	}
 }
 
@@ -312,9 +514,9 @@ func TestRcloneExec_CopyDir_Succeeds(t *testing.T) {
 		t.Fatalf("writing test file: %v", err)
 	}
 	dst := t.TempDir()
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -340,9 +542,9 @@ func TestRcloneExec_SyncDir_DeletesExtra(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dst, "stale.txt"), []byte("remove"), 0o644); err != nil {
 		t.Fatalf("writing test file: %v", err)
 	}
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -363,10 +565,10 @@ func TestRcloneExec_SyncDir_BackupDir_PreservesDeleted(t *testing.T) {
 		t.Fatalf("writing test file: %v", err)
 	}
 	backupDir := t.TempDir()
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
 	backupDirArg := ":local:" + backupDir
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath, BackupDirArg: backupDirArg})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeSync, Job: job, Source: src + "/", Destination: ":local:" + dst, BackupDirArg: backupDirArg})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok", result.Status)
@@ -382,9 +584,9 @@ func TestRcloneExec_SyncDir_BackupDir_PreservesDeleted(t *testing.T) {
 func TestRcloneExec_MissingSource_Fails(t *testing.T) {
 	skipIfNoRclone(t)
 	dst := t.TempDir()
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: "/nonexistent/path/does/not/exist", Destination: ":local:" + dst, LogFile: logPath})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: "/nonexistent/path/does/not/exist", Destination: ":local:" + dst})
 	result := executor.Exec(context.Background(), args, nil)
 	if result.Status != StatusFailed {
 		t.Errorf("Status = %q, want failed", result.Status)
@@ -397,7 +599,9 @@ func TestRcloneExec_MissingSource_Fails(t *testing.T) {
 
 func TestCleanupArchives_DryRun_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 30, true)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", BackupPath: "/some/path", RetentionDays: 30, DryRun: true,
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -405,7 +609,9 @@ func TestCleanupArchives_DryRun_Skips(t *testing.T) {
 
 func TestCleanupArchives_EmptyBackupPath_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "", 30, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", RetentionDays: 30,
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -413,9 +619,88 @@ func TestCleanupArchives_EmptyBackupPath_Skips(t *testing.T) {
 
 func TestCleanupArchives_ZeroRetention_Skips(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "remote", "/some/path", 0, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "remote", BackupPath: "/some/path",
+	})
 	if err != nil {
 		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestPrepareArchiveCleanup_UsesProvidedTime(t *testing.T) {
+	now := time.Date(2026, time.July, 19, 23, 59, 59, 0, time.FixedZone("test", -5*60*60))
+
+	plan, shouldRun := prepareArchiveCleanup(ArchiveCleanupRequest{
+		RemoteName:    "remote",
+		BackupPath:    "archives",
+		RetentionDays: 30,
+	}, now)
+
+	if !shouldRun {
+		t.Fatal("prepareArchiveCleanup() shouldRun = false, want true")
+	}
+	if plan.cutoff != "2026-06-19" {
+		t.Errorf("cutoff = %q, want %q from injected time", plan.cutoff, "2026-06-19")
+	}
+}
+
+func TestPurgeExpiredArchiveDirectories_ValidatesListingBeforePurging(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	const (
+		expiredDirectory = "2020-01-01_000000"
+		archiveRoot      = "remote:archives"
+	)
+	listing := strings.NewReader(
+		"-1 2020-01-01 00:00:00.000000000 " + expiredDirectory + "\n" +
+			strings.Repeat("x", bufio.MaxScanTokenSize+1),
+	)
+	var purgedTargets []string
+
+	err := executor.purgeExpiredArchiveDirectories(context.Background(), archivePurgeRequest{
+		plan: archiveCleanupPlan{
+			remoteName:  "remote",
+			archiveRoot: archiveRoot,
+			cutoff:      "2026-05-10",
+		},
+		listing: listing,
+		purge: func(_ context.Context, target string) error {
+			purgedTargets = append(purgedTargets, target)
+			return nil
+		},
+	})
+
+	if err == nil {
+		t.Fatal("purgeExpiredArchiveDirectories() = nil, want later scan error")
+	}
+	if !strings.Contains(err.Error(), "scanning archive listing for "+archiveRoot) {
+		t.Errorf("error = %q, want archive listing context", err)
+	}
+	if len(purgedTargets) != 0 {
+		t.Errorf("purged targets = %v, want no mutation before complete validation", purgedTargets)
+	}
+}
+
+func TestDrainArchiveListing_RejectsOversizedStdout(t *testing.T) {
+	executor, _ := newRcloneTestExecutor(t)
+	const listingLimit = 4 * 1024 * 1024
+	stdout := strings.NewReader(strings.Repeat("x", listingLimit+1))
+
+	listing, _, stdoutReadErr, stderrReadErr := executor.drainArchiveListing(
+		stdout,
+		strings.NewReader(""),
+	)
+
+	if stdoutReadErr == nil {
+		t.Fatal("drainArchiveListing() stdout error = nil, want size limit error")
+	}
+	if !strings.Contains(stdoutReadErr.Error(), "exceeds") {
+		t.Errorf("stdout error = %q, want size limit context", stdoutReadErr)
+	}
+	if stderrReadErr != nil {
+		t.Errorf("stderr error = %v, want nil", stderrReadErr)
+	}
+	if len(listing) > listingLimit {
+		t.Errorf("retained listing bytes = %d, want at most %d", len(listing), listingLimit)
 	}
 }
 
@@ -457,7 +742,9 @@ func TestCleanupArchives_PurgesExpired(t *testing.T) {
 		t.Fatalf("writing archive file: %v", err)
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
@@ -480,7 +767,9 @@ func TestCleanupArchives_KeepsRecent(t *testing.T) {
 		t.Fatalf("writing archive file: %v", err)
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
@@ -496,31 +785,14 @@ func TestCleanupArchives_ListingFailure_ReturnsError(t *testing.T) {
 	executor, _ := newRcloneTestExecutor(t)
 	// "nosuchremote" is not defined in the temp rclone config, so lsd fails
 	// with a non-3 exit code: a real configuration problem, not "no archives".
-	err := executor.CleanupArchives(context.Background(), "nosuchremote", "/tmp/whatever", 7, false)
+	err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "nosuchremote", BackupPath: "/tmp/whatever", RetentionDays: 7,
+	})
 	if err == nil {
 		t.Fatal("CleanupArchives = nil, want error for undefined remote")
 	}
 	if !strings.Contains(err.Error(), "listing archive root") {
 		t.Errorf("error %q should carry the listing context", err)
-	}
-}
-
-func TestFirstStderrLine(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		want string
-	}{
-		{"non-exit error", errors.New("plain failure"), ""},
-		{"exit error with empty stderr", &exec.ExitError{}, ""},
-		{"multi-line stderr returns first line trimmed", &exec.ExitError{Stderr: []byte("  first line  \nsecond line\n")}, "first line"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := firstStderrLine(tt.err); got != tt.want {
-				t.Errorf("firstStderrLine(%v) = %q, want %q", tt.err, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -539,7 +811,9 @@ func TestCleanupArchives_CanceledContext_ReturnsError(t *testing.T) {
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	cancelCtx()
 	executor, _ := newRcloneTestExecutor(t)
-	err := executor.CleanupArchives(ctx, "testlocal", archiveRoot, 7, false)
+	err := executor.CleanupArchives(ctx, ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	})
 	if err == nil {
 		t.Fatal("CleanupArchives = nil, want error for canceled context")
 	}
@@ -554,7 +828,9 @@ func TestCleanupArchives_MissingBackupRoot_NoError(t *testing.T) {
 	defer cleanup()
 	executor, _ := newRcloneTestExecutor(t)
 	missing := filepath.Join(t.TempDir(), "never-created")
-	if err := executor.CleanupArchives(context.Background(), "testlocal", missing, 7, false); err != nil {
+	if err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: missing, RetentionDays: 7,
+	}); err != nil {
 		t.Fatalf("CleanupArchives = %v, want nil for missing backup root (rclone exit 3)", err)
 	}
 }
@@ -575,7 +851,9 @@ func TestCleanupArchives_UnrecognizedAndInvalidDirs_NeverPurged(t *testing.T) {
 		}
 	}
 	executor, _ := newRcloneTestExecutor(t)
-	if err := executor.CleanupArchives(context.Background(), "testlocal", archiveRoot, 7, false); err != nil {
+	if err := executor.CleanupArchives(context.Background(), ArchiveCleanupRequest{
+		RemoteName: "testlocal", BackupPath: archiveRoot, RetentionDays: 7,
+	}); err != nil {
 		t.Fatalf("CleanupArchives returned error: %v", err)
 	}
 	for _, name := range keep {
@@ -627,11 +905,11 @@ func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
 	defer cancel()
 
-	executor, logPath := newRcloneTestExecutor(t)
+	executor, _ := newRcloneTestExecutor(t)
 	// --config /dev/null prevents rclone from loading the developer's
 	// real rclone config during the test.
 	job := config.Job{ExtraFlags: []string{"--config", "/dev/null"}}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst, LogFile: logPath})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Job: job, Source: src + "/", Destination: ":local:" + dst})
 	result := executor.Exec(ctx, args, nil)
 
 	if result.Status != StatusTimedOut {
@@ -642,11 +920,11 @@ func TestRcloneExec_ExpiredContext_ReturnsTimedOut(t *testing.T) {
 func TestRcloneCommand_InjectsPasswordOnlyWhenSet(t *testing.T) {
 	logger := newTestLogger(t)
 
-	withPass := NewRcloneExecutor(logger, "", "s3cr3t")
+	withPass := NewRcloneExecutor(logger, "s3cr3t")
 	cmd := withPass.rcloneCommand(context.Background(), "version")
 	found := false
 	for _, e := range cmd.Env {
-		if e == "RCLONE_CONFIG_PASS=s3cr3t" {
+		if e == rcloneConfigPasswordEnvironment+"=s3cr3t" {
 			found = true
 		}
 	}
@@ -659,8 +937,12 @@ func TestRcloneCommand_InjectsPasswordOnlyWhenSet(t *testing.T) {
 		}
 	}
 
-	noPass := NewRcloneExecutor(logger, "", "")
+	t.Setenv("RCLONE_PASSWORD_COMMAND", "native-provider")
+	noPass := NewRcloneExecutor(logger, "")
 	if cmd2 := noPass.rcloneCommand(context.Background(), "version"); cmd2.Env != nil {
-		t.Errorf("cmd.Env = %v, want nil (inherit) when configPass empty", cmd2.Env)
+		t.Errorf(
+			"cmd.Env = %v, want nil so native credential variables are inherited",
+			cmd2.Env,
+		)
 	}
 }

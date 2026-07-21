@@ -1,13 +1,24 @@
 package engine
 
 import (
-	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/jkleinne/shuttle/internal/config"
-	"github.com/jkleinne/shuttle/internal/log"
 )
+
+type recordingWarningLogger struct {
+	messages []string
+}
+
+func (l *recordingWarningLogger) Warn(message string) {
+	l.messages = append(l.messages, message)
+}
+
+func (l *recordingWarningLogger) output() string {
+	return strings.Join(l.messages, "\n")
+}
 
 func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 	defaults := &config.RsyncDefaults{
@@ -24,8 +35,8 @@ func TestBuildRsyncArgs_DefaultsAndExtraFlags(t *testing.T) {
 	if !strings.Contains(joined, "--stats") {
 		t.Error("missing instrumentation flag --stats")
 	}
-	if !strings.Contains(joined, "--info=progress2") {
-		t.Error("missing instrumentation flag --info=progress2")
+	if !strings.Contains(joined, rsyncInfoProgressFlag) {
+		t.Errorf("missing instrumentation flag %s", rsyncInfoProgressFlag)
 	}
 	// Default flags must be present.
 	if !strings.Contains(joined, "-a") {
@@ -82,16 +93,24 @@ func TestBuildRsyncArgs_DeleteNotAppliedToFile(t *testing.T) {
 	}
 }
 
-func TestBuildRsyncArgs_LogFile(t *testing.T) {
-	args := BuildRsyncArgs(RsyncArgsRequest{Source: "/src", Destination: "/dst", LogFile: "/tmp/shuttle.log"})
-	found := false
-	for _, a := range args {
-		if strings.HasPrefix(a, "--log-file=") {
-			found = true
-		}
+func TestBuildRsyncArgs_InstrumentationPrecedesUserFlags(t *testing.T) {
+	args := BuildRsyncArgs(RsyncArgsRequest{
+		Defaults:    &config.RsyncDefaults{Flags: []string{"--stats"}},
+		Job:         config.Job{ExtraFlags: []string{"--out-format=user"}},
+		Source:      "/src",
+		Destination: "/dst",
+	})
+	want := []string{
+		"--stats",
+		"--info=progress2",
+		"--out-format=%i %n%L",
+		"--stats",
+		"--out-format=user",
+		"/src",
+		"/dst",
 	}
-	if !found {
-		t.Error("--log-file= should be present when logFile is non-empty")
+	if !slices.Equal(args, want) {
+		t.Errorf("BuildRsyncArgs() = %v, want %v", args, want)
 	}
 }
 
@@ -105,7 +124,7 @@ func TestBuildRcloneArgs_DefaultsAndOverrides(t *testing.T) {
 		RcloneTuning: config.RcloneTuning{Bwlimit: "2M"}, // per-job override
 		ExtraFlags:   []string{"--track-renames"},
 	}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src/", Destination: "remote:dst/", LogFile: "/tmp/log"})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src/", Destination: "remote:dst/"})
 	joined := strings.Join(args, " ")
 
 	// Subcommand is first.
@@ -147,7 +166,7 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 	job := config.Job{
 		FilterFile: "/job/filters.txt",
 	}
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Defaults: defaults, Job: job, Source: "/src", Destination: "remote:dst"})
 	// The job-level filter file should be used; the default must not appear.
 	found := false
 	for i, a := range args {
@@ -166,19 +185,15 @@ func TestBuildRcloneArgs_JobFilterFileOverridesDefault(t *testing.T) {
 }
 
 func TestBuildRcloneArgs_Instrumentation(t *testing.T) {
-	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst", LogFile: "/tmp/log"})
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--stats 1s") {
-		t.Error("missing instrumentation --stats 1s")
+	args := BuildRcloneArgs(RcloneArgsRequest{Subcommand: config.ModeCopy, Source: "/src", Destination: "remote:dst"})
+	wantPrefix := []string{"copy", "--stats", "1s", "-P", "--use-json-log", "--log-level", "INFO"}
+	if got := strings.Join(args[:len(wantPrefix)], " "); got != strings.Join(wantPrefix, " ") {
+		t.Errorf("instrumentation prefix = %q, want %q", got, strings.Join(wantPrefix, " "))
 	}
-	if !strings.Contains(joined, "-P") {
-		t.Error("missing instrumentation -P")
-	}
-	if !strings.Contains(joined, "--log-file /tmp/log") {
-		t.Error("missing instrumentation --log-file")
-	}
-	if !strings.Contains(joined, "--log-level INFO") {
-		t.Error("missing instrumentation --log-level")
+	for _, arg := range args {
+		if arg == logFileFlag || strings.HasPrefix(arg, logFileFlag+"=") {
+			t.Errorf("Shuttle instrumentation exposes a primary log path: %v", args)
+		}
 	}
 }
 
@@ -239,78 +254,83 @@ func TestBuildTuningFlags_AllFields(t *testing.T) {
 }
 
 func TestWarnFlagConflicts_DetectsRsyncStats(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "--stats", "-v"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --stats, got %q", buf.String())
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for --stats, got %q", logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_DetectsRsyncInfoProgress(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
-	WarnFlagConflicts(logger, config.EngineRsync, []string{"--info=progress2"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --info=progress2, got %q", buf.String())
+	WarnFlagConflicts(logger, config.EngineRsync, []string{rsyncInfoProgressFlag})
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for %s, got %q", rsyncInfoProgressFlag, logger.output())
+	}
+}
+
+func TestWarnFlagConflicts_DetectsRsyncOutFormat(t *testing.T) {
+	logger := &recordingWarningLogger{}
+
+	WarnFlagConflicts(logger, config.EngineRsync, []string{"--out-format=custom"})
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for --out-format, got %q", logger.output())
+	}
+}
+
+func TestWarnFlagConflicts_DetectsRsyncLogFormat(t *testing.T) {
+	for _, flag := range []string{"--log-format", "--log-format=custom"} {
+		t.Run(flag, func(t *testing.T) {
+			logger := &recordingWarningLogger{}
+
+			WarnFlagConflicts(logger, config.EngineRsync, []string{flag})
+
+			if !strings.Contains(logger.output(), "conflicts") {
+				t.Errorf("expected conflict warning for %s, got %q", flag, logger.output())
+			}
+		})
 	}
 }
 
 func TestWarnFlagConflicts_DetectsRcloneLogFile(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRclone, []string{"--log-file=/custom/path.log"})
-	if !strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("expected conflict warning for --log-file=..., got %q", buf.String())
+	if !strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("expected conflict warning for --log-file=..., got %q", logger.output())
+	}
+}
+
+func TestWarnFlagConflicts_DetectsRcloneJSONAndLogLevel(t *testing.T) {
+	for _, flag := range []string{"--use-json-log", "--log-level=NOTICE"} {
+		t.Run(flag, func(t *testing.T) {
+			logger := &recordingWarningLogger{}
+			WarnFlagConflicts(logger, config.EngineRclone, []string{flag})
+			if !strings.Contains(logger.output(), "conflicts") {
+				t.Errorf("expected conflict warning for %s, got %q", flag, logger.output())
+			}
+		})
 	}
 }
 
 func TestWarnFlagConflicts_NoConflict(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	WarnFlagConflicts(logger, config.EngineRsync, []string{"-a", "-v", "-h"})
-	if strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("unexpected conflict warning for safe flags: %q", buf.String())
+	if strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("unexpected conflict warning for safe flags: %q", logger.output())
 	}
 }
 
 func TestWarnFlagConflicts_UnknownEngine_NoWarning(t *testing.T) {
-	var buf strings.Builder
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(&buf, logPath, false, log.VerbosityNormal)
-	if err != nil {
-		t.Fatalf("creating logger: %v", err)
-	}
-	defer logger.Close()
+	logger := &recordingWarningLogger{}
 
 	// An unrecognized engine must match no instrumentation keys at all,
 	// not silently fall through to rclone's.
 	WarnFlagConflicts(logger, "tarsnap", []string{"--stats", "--log-file=/x"})
-	if strings.Contains(buf.String(), "conflicts") {
-		t.Errorf("unknown engine should produce no conflict warnings, got %q", buf.String())
+	if strings.Contains(logger.output(), "conflicts") {
+		t.Errorf("unknown engine should produce no conflict warnings, got %q", logger.output())
 	}
 }

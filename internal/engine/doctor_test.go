@@ -28,7 +28,11 @@ func TestRenderReport_Symbols(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			RenderReport(&buf, Report{Checks: []CheckResult{{Name: "x", Level: tt.level, Detail: "d"}}}, false)
+			RenderReport(
+				&buf,
+				Report{Checks: []CheckResult{{Name: "x", Level: tt.level, Detail: "d"}}},
+				TerminalColorDisabled,
+			)
 			if !strings.Contains(buf.String(), tt.want) {
 				t.Errorf("output %q missing symbol %q", buf.String(), tt.want)
 			}
@@ -41,7 +45,7 @@ func TestRenderReport_Tally_OmitsZeroSegments(t *testing.T) {
 	RenderReport(&buf, Report{Checks: []CheckResult{
 		{Name: "rsync", Level: CheckOK, Detail: "3.2.7"},
 		{Name: "remote", Level: CheckFail, Detail: "koofr — not found in rclone config"},
-	}}, false)
+	}}, TerminalColorDisabled)
 	out := buf.String()
 	if !strings.Contains(out, "1 ok") || !strings.Contains(out, "1 failed") {
 		t.Errorf("tally missing counts: %q", out)
@@ -62,7 +66,11 @@ func TestReport_HasFailures(t *testing.T) {
 
 func TestRenderReport_Color_WrapsSymbolInANSI(t *testing.T) {
 	var buf bytes.Buffer
-	RenderReport(&buf, Report{Checks: []CheckResult{{Name: "rsync", Level: CheckOK, Detail: "3.2.7"}}}, true)
+	RenderReport(
+		&buf,
+		Report{Checks: []CheckResult{{Name: "rsync", Level: CheckOK, Detail: "3.2.7"}}},
+		TerminalColorEnabled,
+	)
 	out := buf.String()
 	if !strings.Contains(out, ansiGreen+symbolOK+ansiReset) {
 		t.Errorf("colored output should wrap the OK glyph in green ANSI codes; got %q", out)
@@ -71,7 +79,7 @@ func TestRenderReport_Color_WrapsSymbolInANSI(t *testing.T) {
 
 func TestRenderReport_EmptyReport_RendersNoChecksRun(t *testing.T) {
 	var buf bytes.Buffer
-	RenderReport(&buf, Report{}, false)
+	RenderReport(&buf, Report{}, TerminalColorDisabled)
 	out := buf.String()
 	if !strings.Contains(out, "shuttle doctor") {
 		t.Errorf("empty report should still render the header; got %q", out)

@@ -4,28 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 const spinnerInterval = 80 * time.Millisecond
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// sanitizeProgress removes control characters (C0, C1, DEL) from progress text
-// so attacker-influenceable bytes from tool output (e.g. a filename with
-// embedded ANSI/OSC escapes) cannot drive the terminal. Shuttle's own color
-// codes are added after sanitization in renderSpinner, so they are unaffected.
-func sanitizeProgress(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
-}
 
 // ProgressWriter manages the live terminal display during job execution.
 // In interactive mode, it shows a spinner on the active job line and replaces
@@ -33,11 +18,12 @@ func sanitizeProgress(s string) string {
 // (pipes, log files, cron), StartJob and UpdateProgress are no-ops; FinishJob
 // and SkipJob print plain status lines with no cursor manipulation.
 type ProgressWriter struct {
-	w           io.Writer
-	interactive bool
-	useColor    bool
+	w         io.Writer
+	mode      ProgressMode
+	colorMode TerminalColorMode
 
-	mu              sync.Mutex
+	stateMutex      sync.Mutex
+	outputMutex     sync.Mutex
 	currentLabel    string
 	currentProgress string
 	spinnerIdx      int
@@ -45,16 +31,17 @@ type ProgressWriter struct {
 
 	done chan struct{}
 	wg   sync.WaitGroup
+	// ticks is a deterministic test seam. Production uses a real ticker when nil.
+	ticks <-chan time.Time
 }
 
-// NewProgressWriter creates a ProgressWriter that writes to w.
-// When interactive is true, the writer uses ANSI cursor manipulation for
-// in-place spinner updates. Set useColor to match the terminal's color support.
-func NewProgressWriter(w io.Writer, interactive bool, useColor bool) *ProgressWriter {
+// NewProgressWriter creates the terminal progress boundary with explicit,
+// zero-safe presentation options for cursor manipulation and Shuttle styling.
+func NewProgressWriter(w io.Writer, options ProgressOptions) *ProgressWriter {
 	return &ProgressWriter{
-		w:           w,
-		interactive: interactive,
-		useColor:    useColor,
+		w:         w,
+		mode:      options.Mode,
+		colorMode: options.Color,
 	}
 }
 
@@ -62,7 +49,7 @@ func NewProgressWriter(w io.Writer, interactive bool, useColor bool) *ProgressWr
 // for passing to executors. Returns nil in non-interactive mode so executors
 // skip progress parsing.
 func (pw *ProgressWriter) ProgressCallback() func(string) {
-	if !pw.interactive {
+	if pw.mode != ProgressInteractive {
 		return nil
 	}
 	return pw.UpdateProgress
@@ -70,7 +57,7 @@ func (pw *ProgressWriter) ProgressCallback() func(string) {
 
 // Interactive returns whether the writer uses cursor manipulation.
 func (pw *ProgressWriter) Interactive() bool {
-	return pw.interactive
+	return pw.mode == ProgressInteractive
 }
 
 // StartJob begins displaying a spinner for the named job.
@@ -78,18 +65,19 @@ func (pw *ProgressWriter) Interactive() bool {
 // Precondition: each StartJob must be paired with a FinishJob call before
 // calling StartJob again.
 func (pw *ProgressWriter) StartJob(ctx context.Context, label string) {
-	pw.mu.Lock()
-	pw.currentLabel = label
+	pw.stateMutex.Lock()
+	pw.currentLabel = SanitizeTerminalText(label)
 	pw.currentProgress = ""
 	pw.spinnerIdx = 0
 	pw.startTime = time.Now()
-	pw.mu.Unlock()
+	pw.stateMutex.Unlock()
 
-	if !pw.interactive {
+	if pw.mode != ProgressInteractive {
 		return
 	}
 
 	pw.done = make(chan struct{})
+	pw.renderSpinner()
 	pw.wg.Add(1)
 	go pw.spin(ctx)
 }
@@ -100,12 +88,13 @@ func (pw *ProgressWriter) StartJob(ctx context.Context, label string) {
 // attacker-influenceable filenames in tool output cannot inject terminal escapes.
 // In non-interactive mode, this is a no-op.
 func (pw *ProgressWriter) UpdateProgress(text string) {
-	if !pw.interactive {
+	if pw.mode != ProgressInteractive {
 		return
 	}
-	pw.mu.Lock()
-	pw.currentProgress = sanitizeProgress(text)
-	pw.mu.Unlock()
+	pw.stateMutex.Lock()
+	pw.currentProgress = SanitizeTerminalText(text)
+	pw.stateMutex.Unlock()
+	pw.renderSpinner()
 }
 
 // FinishJob stops the spinner and writes the final status line for the job
@@ -118,44 +107,56 @@ func (pw *ProgressWriter) UpdateProgress(text string) {
 // A transfer detail line is appended when result.Status is StatusOK and
 // result.Stats.FilesTransferred > 0.
 func (pw *ProgressWriter) FinishJob(result ItemResult) {
-	if pw.interactive {
+	if pw.mode == ProgressInteractive {
 		close(pw.done)
 		pw.wg.Wait()
+	}
+
+	pw.stateMutex.Lock()
+	label := pw.currentLabel
+	pw.stateMutex.Unlock()
+
+	symbol := statusSymbol(result.Status, pw.colorMode)
+	stats := itemStatsText(result, pw.colorMode)
+
+	pw.outputMutex.Lock()
+	defer pw.outputMutex.Unlock()
+	if pw.mode == ProgressInteractive {
 		// Terminal write errors are unrecoverable at this call site; the write
 		// is best-effort output and no meaningful recovery action is possible.
 		_, _ = fmt.Fprint(pw.w, ansiClearLine)
 	}
-
-	pw.mu.Lock()
-	label := pw.currentLabel
-	pw.mu.Unlock()
-
-	symbol := statusSymbol(result.Status, pw.useColor)
-	stats := itemStatsText(result, pw.useColor)
 	_, _ = fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, label, stats)
 
 	if result.Status == StatusOK && result.Stats.FilesTransferred > 0 {
 		_, _ = fmt.Fprintf(pw.w, "    %s\n",
-			colorize(pw.useColor, ansiGreen, formatTransfer(result.Stats)))
+			colorize(pw.colorMode, ansiGreen, formatTransfer(result.Stats)))
 	}
 }
 
 // SkipJob writes a skip status line without starting a spinner.
 // Safe to call without a preceding StartJob.
 func (pw *ProgressWriter) SkipJob(name string) {
-	symbol := statusSymbol(StatusSkipped, pw.useColor)
-	_, _ = fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, name,
-		colorize(pw.useColor, ansiYellow, "skipped"))
+	symbol := statusSymbol(StatusSkipped, pw.colorMode)
+	cleanName := SanitizeTerminalText(name)
+
+	pw.outputMutex.Lock()
+	defer pw.outputMutex.Unlock()
+	_, _ = fmt.Fprintf(pw.w, "%s %s  %s\n", symbol, cleanName,
+		colorize(pw.colorMode, ansiYellow, "skipped"))
 }
 
 // spin is the spinner goroutine. It writes the current spinner frame at
 // regular intervals until done is closed or ctx is canceled.
 func (pw *ProgressWriter) spin(ctx context.Context) {
 	defer pw.wg.Done()
-	ticker := time.NewTicker(spinnerInterval)
-	defer ticker.Stop()
-
-	pw.renderSpinner()
+	ticks := pw.ticks
+	var ticker *time.Ticker
+	if ticks == nil {
+		ticker = time.NewTicker(spinnerInterval)
+		ticks = ticker.C
+		defer ticker.Stop()
+	}
 
 	for {
 		select {
@@ -163,10 +164,13 @@ func (pw *ProgressWriter) spin(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			pw.mu.Lock()
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			pw.stateMutex.Lock()
 			pw.spinnerIdx = (pw.spinnerIdx + 1) % len(spinnerFrames)
-			pw.mu.Unlock()
+			pw.stateMutex.Unlock()
 			pw.renderSpinner()
 		}
 	}
@@ -175,19 +179,21 @@ func (pw *ProgressWriter) spin(ctx context.Context) {
 // renderSpinner writes the current spinner frame, label, and progress text,
 // overwriting the previous line content via ANSI clear-line and carriage return.
 func (pw *ProgressWriter) renderSpinner() {
-	pw.mu.Lock()
+	pw.stateMutex.Lock()
 	frame := spinnerFrames[pw.spinnerIdx]
 	label := pw.currentLabel
 	progress := pw.currentProgress
 	elapsed := time.Since(pw.startTime)
-	pw.mu.Unlock()
+	pw.stateMutex.Unlock()
 
 	if progress == "" {
 		progress = FormatDuration(elapsed)
 	}
 
-	coloredFrame := colorize(pw.useColor, ansiBlue, frame)
-	coloredProgress := colorize(pw.useColor, ansiDim, progress)
+	coloredFrame := colorize(pw.colorMode, ansiBlue, frame)
+	coloredProgress := colorize(pw.colorMode, ansiDim, progress)
 
-	_, _ = fmt.Fprintf(pw.w, "\033[2K\r%s %s  %s", coloredFrame, label, coloredProgress)
+	pw.outputMutex.Lock()
+	defer pw.outputMutex.Unlock()
+	_, _ = fmt.Fprintf(pw.w, "%s%s %s  %s", ansiClearLine, coloredFrame, label, coloredProgress)
 }

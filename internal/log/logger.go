@@ -3,12 +3,18 @@
 package log
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -20,10 +26,25 @@ const (
 	colorReset  = "\033[0m"
 )
 
+// ToolSource is the closed set of external tools allowed to define log frames.
+type ToolSource uint8
+
+const (
+	// ToolRsync identifies records captured from rsync.
+	ToolRsync ToolSource = iota + 1
+	// ToolRclone identifies records captured from rclone.
+	ToolRclone
+)
+
 // hoursPerDay is used when converting a retention window expressed in days
 // into a time.Duration. Extracted as a named constant per project rules
 // against unlabelled numeric literals.
 const hoursPerDay = 24
+
+const (
+	logDirectoryPermissions os.FileMode = 0o700
+	logFilePermissions      os.FileMode = 0o600
+)
 
 // Verbosity controls how much terminal output Logger emits. File output
 // is always written at full detail (including Debug) regardless of level.
@@ -38,6 +59,12 @@ const (
 	VerbosityVerbose Verbosity = 1
 )
 
+// Options controls terminal rendering and message verbosity.
+type Options struct {
+	UseColor  bool
+	Verbosity Verbosity
+}
+
 // Logger writes to three streams: an informational terminal stream
 // (typically os.Stdout), a diagnostic stream (typically os.Stderr), and a
 // plain-text log file with timestamps. Informational messages (Header,
@@ -47,6 +74,7 @@ type Logger struct {
 	terminal  io.Writer
 	stderr    io.Writer
 	file      *os.File
+	fileMu    sync.Mutex
 	useColor  bool
 	verbosity Verbosity
 }
@@ -55,24 +83,24 @@ type Logger struct {
 // output to os.Stderr, and plain text to a timestamped log file under logDir.
 // Returns the logger and the log file path. The log directory is created if
 // it does not exist.
-func New(logDir string, useColor bool, verbosity Verbosity) (*Logger, string, error) {
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return nil, "", fmt.Errorf("creating log directory %s: %w", logDir, err)
+func New(logDir string, options Options) (*Logger, string, error) {
+	if err := prepareLogDirectory(logDir); err != nil {
+		return nil, "", err
 	}
 	timestamp := time.Now().Format(logFilenameLayout)
-	logPath := filepath.Join(logDir, timestamp+".log")
 
-	f, err := os.Create(logPath)
+	f, err := os.CreateTemp(logDir, timestamp+"-*.log")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating log file %s: %w", logPath, err)
+		return nil, "", fmt.Errorf("creating unique log file in %s: %w", logDir, err)
 	}
+	logPath := f.Name()
 
 	return &Logger{
 		terminal:  os.Stdout,
 		stderr:    os.Stderr,
 		file:      f,
-		useColor:  useColor,
-		verbosity: verbosity,
+		useColor:  options.UseColor,
+		verbosity: options.Verbosity,
 	}, logPath, nil
 }
 
@@ -80,8 +108,8 @@ func New(logDir string, useColor bool, verbosity Verbosity) (*Logger, string, er
 // file at logPath. Intended for tests where terminal output needs to be
 // captured. The same writer receives both informational and diagnostic
 // messages; tests that need stream separation call SetStderr to redirect.
-func NewWithWriter(terminal io.Writer, logPath string, useColor bool, verbosity Verbosity) (*Logger, error) {
-	f, err := os.Create(logPath)
+func NewWithWriter(terminal io.Writer, logPath string, options Options) (*Logger, error) {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, logFilePermissions)
 	if err != nil {
 		return nil, fmt.Errorf("creating log file %s: %w", logPath, err)
 	}
@@ -89,9 +117,85 @@ func NewWithWriter(terminal io.Writer, logPath string, useColor bool, verbosity 
 		terminal:  terminal,
 		stderr:    terminal,
 		file:      f,
-		useColor:  useColor,
-		verbosity: verbosity,
+		useColor:  options.UseColor,
+		verbosity: options.Verbosity,
 	}, nil
+}
+
+func prepareLogDirectory(directory string) error {
+	exists, err := prepareExistingLogDirectory(directory)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if err := os.MkdirAll(directory, logDirectoryPermissions); err != nil {
+		return fmt.Errorf(
+			"creating log directory %s with permissions %o: %w",
+			directory,
+			logDirectoryPermissions,
+			err,
+		)
+	}
+	exists, err = prepareExistingLogDirectory(directory)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("checking log directory %s after creation: directory is missing", directory)
+	}
+	return nil
+}
+
+func prepareExistingLogDirectory(directory string) (bool, error) {
+	info, err := inspectLogDirectory(directory)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode().Perm() == logDirectoryPermissions {
+		return true, nil
+	}
+	if err := os.Chmod(directory, logDirectoryPermissions); err != nil {
+		return false, fmt.Errorf(
+			"tightening log directory permissions %s to %o: %w",
+			directory,
+			logDirectoryPermissions,
+			err,
+		)
+	}
+	return true, nil
+}
+
+func inspectLogDirectory(directory string) (os.FileInfo, error) {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return nil, fmt.Errorf("checking log directory identity %s: %w", directory, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("log directory %s is a symlink", directory)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("log directory %s is not a directory", directory)
+	}
+	if err := validateLogDirectoryOwner(directory, info, os.Getuid()); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func validateLogDirectoryOwner(directory string, info os.FileInfo, currentUID int) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("log directory %s has unsupported ownership metadata", directory)
+	}
+	if int(stat.Uid) != currentUID {
+		return fmt.Errorf("log directory %s is not owned by current user", directory)
+	}
+	return nil
 }
 
 // SetStderr overrides the writer used for Warn and Error output. Tests that
@@ -103,6 +207,8 @@ func (l *Logger) SetStderr(w io.Writer) {
 
 // Close closes the underlying log file. Should be called via defer after New or NewWithWriter.
 func (l *Logger) Close() {
+	l.fileMu.Lock()
+	defer l.fileMu.Unlock()
 	if l.file != nil {
 		_ = l.file.Close()
 	}
@@ -119,6 +225,7 @@ func (l *Logger) LogPath() string {
 // Header logs a section separator with the given label.
 // Terminal: bold blue "==> label" (hidden in quiet mode). File: "==> label".
 func (l *Logger) Header(msg string) {
+	msg = sanitizeLogText(msg)
 	if l.verbosity >= VerbosityNormal {
 		l.termf("\n%s%s==> %s%s\n", colorBold, colorBlue, msg, colorReset)
 	}
@@ -128,6 +235,7 @@ func (l *Logger) Header(msg string) {
 // Info logs an informational message (hidden in quiet mode).
 // Terminal: blue "[INFO] msg". File: "[INFO] msg".
 func (l *Logger) Info(msg string) {
+	msg = sanitizeLogText(msg)
 	if l.verbosity >= VerbosityNormal {
 		l.termf("%s[INFO]%s %s\n", colorBlue, colorReset, msg)
 	}
@@ -137,6 +245,7 @@ func (l *Logger) Info(msg string) {
 // Success logs a success message (hidden in quiet mode).
 // Terminal: green "[OK] msg". File: "[OK] msg".
 func (l *Logger) Success(msg string) {
+	msg = sanitizeLogText(msg)
 	if l.verbosity >= VerbosityNormal {
 		l.termf("%s[OK]%s %s\n", colorGreen, colorReset, msg)
 	}
@@ -147,6 +256,7 @@ func (l *Logger) Success(msg string) {
 // using --quiet stay silent on first-run noise and benign issues; the log
 // file always records it.
 func (l *Logger) Warn(msg string) {
+	msg = sanitizeLogText(msg)
 	if l.verbosity >= VerbosityNormal {
 		l.errf("%s[WARN]%s %s\n", colorYellow, colorReset, msg)
 	}
@@ -157,6 +267,7 @@ func (l *Logger) Warn(msg string) {
 // in quiet-on-failure cron workflows, errors are the signal that triggers the
 // notification.
 func (l *Logger) Error(msg string) {
+	msg = sanitizeLogText(msg)
 	l.errf("%s[ERROR]%s %s\n", colorRed, colorReset, msg)
 	l.filef("[ERROR] %s", msg)
 }
@@ -165,6 +276,7 @@ func (l *Logger) Error(msg string) {
 // is VerbosityVerbose; the log file always receives the message.
 // File format: "[DEBUG] msg".
 func (l *Logger) Debug(msg string) {
+	msg = sanitizeLogText(msg)
 	if l.verbosity >= VerbosityVerbose {
 		l.termf("%s[DEBUG]%s %s\n", colorBold, colorReset, msg)
 	}
@@ -175,11 +287,13 @@ func (l *Logger) Debug(msg string) {
 // Used by the runner in interactive mode where terminal output
 // is managed by the ProgressWriter.
 func (l *Logger) FileHeader(msg string) {
+	msg = sanitizeLogText(msg)
 	l.filef("==> %s", msg)
 }
 
 // FileInfo writes an informational message to the log file only.
 func (l *Logger) FileInfo(msg string) {
+	msg = sanitizeLogText(msg)
 	l.filef("[INFO] %s", msg)
 }
 
@@ -188,12 +302,42 @@ func (l *Logger) FileInfo(msg string) {
 // writing to stderr would still visually interleave with the spinner since
 // both streams share a terminal.
 func (l *Logger) FileWarn(msg string) {
+	msg = sanitizeLogText(msg)
 	l.filef("[WARN] %s", msg)
 }
 
 // FileError writes an error message to the log file only.
 func (l *Logger) FileError(msg string) {
+	msg = sanitizeLogText(msg)
 	l.filef("[ERROR] %s", msg)
+}
+
+// FileTool writes one complete file-only record from a known external tool.
+// Unknown identities retain their sanitized context under Logger's trusted
+// error frame instead of defining a new tool prefix.
+func (l *Logger) FileTool(source ToolSource, record string) {
+	record = sanitizeLogText(record)
+	switch source {
+	case ToolRsync:
+		l.filef("[RSYNC] %s", record)
+	case ToolRclone:
+		l.filef("[RCLONE] %s", record)
+	default:
+		l.filef(
+			"[ERROR] unexpected tool source %d: %s",
+			source,
+			record,
+		)
+	}
+}
+
+func sanitizeLogText(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+			return -1
+		}
+		return r
+	}, text)
 }
 
 // termf formats and writes msg to the terminal stream. When useColor is false,
@@ -219,6 +363,8 @@ func (l *Logger) errf(format string, args ...any) {
 // filef formats msg with a timestamp prefix and writes it to the log file.
 // File format: [YYYY-MM-DD HH:MM:SS] <formatted message>
 func (l *Logger) filef(format string, args ...any) {
+	l.fileMu.Lock()
+	defer l.fileMu.Unlock()
 	if l.file == nil {
 		return
 	}
@@ -226,26 +372,25 @@ func (l *Logger) filef(format string, args ...any) {
 	_, _ = fmt.Fprintf(l.file, "[%s] %s\n", ts, fmt.Sprintf(format, args...))
 }
 
-// logFilePattern matches the shape of timestamped log filenames produced by
-// New. The creation time is encoded in the filename in big-endian date format,
-// which makes lexicographic sort equivalent to chronological sort.
-var logFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{6})\.log$`)
+// logFilePattern matches legacy timestamp-only filenames and the unique
+// alphanumeric suffix filenames produced by New. The creation time is encoded
+// in the first capture group in big-endian date format.
+var logFilePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}_\d{6})(?:-[A-Za-z0-9]+)?\.log$`)
 
 // logFilenameLayout mirrors the format used by New when creating a log file.
 const logFilenameLayout = "2006-01-02_150405"
 
 // PruneOldLogs deletes log files under logDir whose embedded timestamp is
-// older than maxAgeDays relative to asOf. Only files matching the shuttle
-// log-filename pattern (YYYY-MM-DD_HHMMSS.log) are considered; any other
-// files in the directory are ignored. Timestamps are parsed in asOf's
-// zone; callers pass time.Now() so the parse zone matches the zone New
-// used when stamping the filename, keeping retention consistent for
-// non-UTC users.
+// older than maxAgeDays relative to asOf. Legacy timestamp-only filenames and
+// unique filenames with an alphanumeric suffix are considered; any other files
+// in the directory are ignored. Timestamps are parsed in asOf's zone; callers
+// pass time.Now() so the parse zone matches the zone New used when stamping the
+// filename, keeping retention consistent for non-UTC users.
 //
 // Pruning is best-effort per file: an individual deletion failure is
 // recorded as a warning and the function continues with the rest.
-// A non-nil err is returned only when the directory itself cannot be read
-// (a missing directory is treated as "nothing to prune").
+// A non-nil err is returned when the directory cannot be securely prepared or
+// read. A missing directory is treated as "nothing to prune".
 //
 // A maxAgeDays value of zero or negative disables pruning and returns
 // (0, nil, nil) without touching the filesystem.
@@ -254,14 +399,17 @@ func PruneOldLogs(logDir string, maxAgeDays int, asOf time.Time) (deleted int, w
 		return 0, nil, nil
 	}
 
+	exists, err := prepareExistingLogDirectory(logDir)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !exists {
+		return 0, nil, nil
+	}
+
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// First-ever run: the log directory hasn't been created yet.
-			// Nothing to prune, and not a condition worth warning about.
-			return 0, nil, nil
-		}
-		return 0, nil, fmt.Errorf("reading log dir %s: %w", logDir, err)
+		return 0, nil, fmt.Errorf("reading log directory %s: %w", logDir, err)
 	}
 
 	cutoff := asOf.Add(-time.Duration(maxAgeDays*hoursPerDay) * time.Hour)

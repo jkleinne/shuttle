@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
@@ -16,13 +18,49 @@ import (
 
 func newTestLogger(t *testing.T) *log.Logger {
 	t.Helper()
+	logger, _ := newTestLoggerWithPath(t)
+	return logger
+}
+
+func newTestLoggerWithPath(t *testing.T) (*log.Logger, string) {
+	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(os.Stdout, logPath, false, log.VerbosityNormal)
+	logger, err := log.NewWithWriter(os.Stdout, logPath, log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("creating test logger: %v", err)
 	}
 	t.Cleanup(func() { logger.Close() })
-	return logger
+	return logger, logPath
+}
+
+func assertPrimaryLogFrames(t *testing.T, logPath, tool string) string {
+	t.Helper()
+	content, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading primary log: %v", err)
+	}
+	text := string(content)
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("primary log has no trusted records")
+	}
+	frame := regexp.MustCompile(
+		`^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[` + regexp.QuoteMeta(tool) + `\] `,
+	)
+	for lineNumber, line := range lines {
+		if !frame.MatchString(line) {
+			t.Errorf("primary log line %d is not a trusted %s frame: %q", lineNumber+1, tool, line)
+		}
+		for _, value := range line {
+			if unicode.IsControl(value) {
+				t.Errorf("primary log line %d retains control U+%04X: %q", lineNumber+1, value, line)
+			}
+		}
+	}
+	return text
 }
 
 func TestRsyncExec_TransfersFiles(t *testing.T) {
@@ -51,6 +89,38 @@ func TestRsyncExec_TransfersFiles(t *testing.T) {
 	}
 	if string(content) != "world" {
 		t.Errorf("file content = %q, want world", string(content))
+	}
+}
+
+func TestRsyncExec_HumanReadableProgressCallsBack(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	const payloadSizeWithHumanReadableUnit = 128 * 1024
+	content := bytes.Repeat([]byte("x"), payloadSizeWithHumanReadableUnit)
+	if err := os.WriteFile(filepath.Join(src, "payload.bin"), content, 0o600); err != nil {
+		t.Fatalf("writing test file: %v", err)
+	}
+	args := BuildRsyncArgs(RsyncArgsRequest{
+		Defaults:    &config.RsyncDefaults{Flags: []string{"-a", "-h"}},
+		Source:      src + "/",
+		Destination: dst + "/",
+	})
+	var progress []string
+
+	result := NewRsyncExecutor(newTestLogger(t)).Exec(
+		context.Background(),
+		args,
+		func(text string) { progress = append(progress, text) },
+	)
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusOK)
+	}
+	if len(progress) == 0 {
+		t.Fatal("human-readable rsync progress produced no callback")
 	}
 }
 
@@ -135,6 +205,129 @@ func TestRsyncExec_ExtraOpts_Applied(t *testing.T) {
 	}
 }
 
+func TestRsyncExec_HostileFilenameTransfersWithTrustedLogFrames(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	src := t.TempDir()
+	dst := t.TempDir()
+	hostileNames := []string{
+		"trusted\n[2099-01-01 00:00:00] [ERROR] forged\x1b\u009b\x7f.txt",
+		"report 45% (xfr#999).txt",
+	}
+	for _, hostileName := range hostileNames {
+		if err := os.WriteFile(filepath.Join(src, hostileName), []byte("content"), 0o600); err != nil {
+			t.Fatalf("writing hostile filename %q: %v", hostileName, err)
+		}
+	}
+	logger, logPath := newTestLoggerWithPath(t)
+	args := BuildRsyncArgs(RsyncArgsRequest{
+		Defaults:    &config.RsyncDefaults{Flags: []string{"-a"}},
+		Source:      src + "/",
+		Destination: dst + "/",
+	})
+	var progress []string
+
+	result := NewRsyncExecutor(logger).Exec(
+		context.Background(),
+		args,
+		func(text string) { progress = append(progress, text) },
+	)
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q", result.Status, StatusOK)
+	}
+	if result.Stats.FilesTransferred != len(hostileNames) {
+		t.Errorf("FilesTransferred = %d, want %d", result.Stats.FilesTransferred, len(hostileNames))
+	}
+	for _, hostileName := range hostileNames {
+		if _, err := os.Stat(filepath.Join(dst, hostileName)); err != nil {
+			t.Errorf("hostile filename %q was not transferred: %v", hostileName, err)
+		}
+	}
+	for _, update := range progress {
+		if strings.Contains(update, "45%") {
+			t.Errorf("hostile filename produced a false progress callback: %q", update)
+		}
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RSYNC")
+	if !strings.Contains(logged, "trusted") {
+		t.Errorf("primary log lacks rsync per-item detail: %q", logged)
+	}
+	if got := strings.Count(logged, "report 45% (xfr#999).txt"); got != 1 {
+		t.Errorf("progress-like itemized filename detail count = %d, want 1: %q", got, logged)
+	}
+	if strings.Contains(logged, "\x1b") || strings.Contains(logged, "\u009b") || strings.Contains(logged, "\x7f") {
+		t.Errorf("primary log retains hostile controls: %q", logged)
+	}
+}
+
+func TestRsyncStdout_ProgressUpdatesAndAllRecordsReachToolLog(t *testing.T) {
+	logger, logPath := newTestLoggerWithPath(t)
+	executor := NewRsyncExecutor(logger)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	var progress []string
+
+	executor.captureProgressRecord(
+		"  1,234  45%   2.30MB/s  0:01:23 (xfr#1, to-chk=1/2)",
+		statsTail,
+		func(text string) { progress = append(progress, text) },
+	)
+	executor.captureStdoutRecord("Number of files: 10", statsTail)
+	executor.captureStdoutRecord(
+		"4.19M 45% (xfr#999)",
+		statsTail,
+	)
+
+	if len(progress) != 1 || !strings.Contains(progress[0], "45%") {
+		t.Errorf("progress callbacks = %q, want one 45%% update", progress)
+	}
+	if got := string(statsTail.Bytes()); !strings.Contains(got, "45%") ||
+		!strings.Contains(got, "Number of files: 10\n") {
+		t.Errorf("statistics tail = %q, want both normalized records", got)
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RSYNC")
+	if !strings.Contains(logged, "1,234  45%   2.30MB/s") {
+		t.Errorf("primary tool log omitted progress repaint record: %q", logged)
+	}
+	if !strings.Contains(logged, "Number of files: 10") {
+		t.Errorf("diagnostic record missing from primary tool log: %q", logged)
+	}
+	if !strings.Contains(logged, "4.19M 45% (xfr#999)") {
+		t.Errorf("progress-shaped filename missing from primary tool log: %q", logged)
+	}
+}
+
+func TestRsyncDrainOutput_DistinguishesFilenameFromCarriageReturnProgress(t *testing.T) {
+	logger, logPath := newTestLoggerWithPath(t)
+	executor := NewRsyncExecutor(logger)
+	statsTail := newTailBuffer(statisticsTailBytes)
+	const progressShapedFilename = "4.19M 45% 2.30MB/s 0:00:01 (xfr#999)"
+	stdout := strings.NewReader(
+		progressShapedFilename + "\n" +
+			"\r  1,234  45%  2.30MB/s  0:01:23 (xfr#1, to-chk=1/2)\n",
+	)
+	var progress []string
+
+	stdoutErr, stderrErr := executor.drainOutput(
+		stdout,
+		strings.NewReader(""),
+		statsTail,
+		func(text string) { progress = append(progress, text) },
+	)
+
+	if stdoutErr != nil || stderrErr != nil {
+		t.Fatalf("drainOutput() errors = (%v, %v), want nil", stdoutErr, stderrErr)
+	}
+	if len(progress) != 1 || !strings.Contains(progress[0], "0:01:23 remaining") {
+		t.Errorf("progress callbacks = %q, want only carriage-return progress", progress)
+	}
+	logged := assertPrimaryLogFrames(t, logPath, "RSYNC")
+	if !strings.Contains(logged, progressShapedFilename) {
+		t.Errorf("primary log missing progress-shaped filename: %q", logged)
+	}
+}
+
 func TestParseRsyncProgress_TypicalLine(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -157,6 +350,11 @@ func TestParseRsyncProgress_TypicalLine(t *testing.T) {
 			"0%, 0.00kB/s",
 		},
 		{
+			"human-readable counter",
+			"      4.19M 100%  709.82MB/s    0:00:00 (xfr#1, to-chk=0/2)",
+			"100%, 709.82MB/s",
+		},
+		{
 			"empty segment",
 			"",
 			"",
@@ -164,6 +362,21 @@ func TestParseRsyncProgress_TypicalLine(t *testing.T) {
 		{
 			"non-progress text",
 			"receiving file list ... done",
+			"",
+		},
+		{
+			"out-format filename containing progress-like fields",
+			">f+++++++++ report 45% speed/s 0:00:01 (xfr#999).txt",
+			"",
+		},
+		{
+			"arbitrary token with human-readable prefix",
+			"4.19M-report 45% speed/s 0:00:01 (xfr#999).txt",
+			"",
+		},
+		{
+			"bare filename under user out format",
+			"4.19M 45% (xfr#999)",
 			"",
 		},
 	}
@@ -190,7 +403,7 @@ func TestScanRsyncProgress_PopulatesCapture(t *testing.T) {
 }
 
 func TestScanRsyncProgress_CallsOnProgress(t *testing.T) {
-	input := "  1,234  45%   2.30MB/s    0:01:23 (xfr#1, to-chk=1/2)\r\n"
+	input := "\r  1,234  45%   2.30MB/s    0:01:23 (xfr#1, to-chk=1/2)\n"
 	r := strings.NewReader(input)
 	var capture bytes.Buffer
 
@@ -292,7 +505,7 @@ func TestScanRsyncProgress_OverCapacityStream_StatsStillParsed(t *testing.T) {
 	listing := strings.Repeat("verbose-file-listing-line.txt\n", 4000) // ~120 KiB
 	stats := readFixture(t, "rsync_stats_transferred.txt")
 	r := strings.NewReader(listing + string(stats))
-	capture := newTailBuffer(rsyncCaptureTailBytes)
+	capture := newTailBuffer(statisticsTailBytes)
 
 	scanRsyncProgress(r, capture, nil)
 

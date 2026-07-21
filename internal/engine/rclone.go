@@ -13,25 +13,55 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/jkleinne/shuttle/internal/config"
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
+const (
+	rcloneCommandName               = "rclone"
+	rcloneConfigPasswordEnvironment = "RCLONE_CONFIG_PASS"
+	archiveListingLimitBytes        = 4 * 1024 * 1024
+)
+
 // RcloneExecutor wraps rclone execution via os/exec. It receives pre-assembled
 // argument lists from the runner (built by BuildRcloneArgs) and handles command
-// execution and stats parsing from the shared log file.
+// execution and command-local bounded stats capture.
 type RcloneExecutor struct {
-	logger     *log.Logger
-	logFile    string
-	configPass string // rclone config password; injected per-command, empty means none
+	logger *log.Logger
+	// configPassword is injected per command, with an empty value preserving native inheritance.
+	configPassword string
+	now            func() time.Time
 }
 
-// NewRcloneExecutor returns a configured RcloneExecutor. logFile is the shared
-// log file used for stats parsing; configPass, when non-empty, is injected as
-// RCLONE_CONFIG_PASS into each rclone command's environment (and nowhere else).
-func NewRcloneExecutor(logger *log.Logger, logFile, configPass string) *RcloneExecutor {
-	return &RcloneExecutor{logger: logger, logFile: logFile, configPass: configPass}
+// ArchiveCleanupRequest carries the values for one remote archive cleanup operation.
+type ArchiveCleanupRequest struct {
+	// RemoteName keeps retention mutations scoped to the same configured remote as the job.
+	RemoteName string
+	// BackupPath keeps cleanup below the job's configured archive root.
+	BackupPath string
+	// RetentionDays makes purge eligibility explicit at the process boundary.
+	RetentionDays int
+	// DryRun prevents retention checks from mutating remote state during previews.
+	DryRun bool
+}
+
+// InformationLogger lets mode selection report fallback behavior without owning logger storage.
+type InformationLogger interface {
+	// Info surfaces mode fallbacks without coupling selection logic to a concrete logger.
+	Info(string)
+}
+
+// NewRcloneExecutor returns a configured RcloneExecutor. configPassword, when
+// non-empty, is injected as RCLONE_CONFIG_PASS into each rclone command's
+// environment and nowhere else.
+func NewRcloneExecutor(logger *log.Logger, configPassword string) *RcloneExecutor {
+	return &RcloneExecutor{
+		logger:         logger,
+		configPassword: configPassword,
+		now:            time.Now,
+	}
 }
 
 // rcloneProgressTracker extracts transfer progress from rclone -P stdout.
@@ -67,143 +97,235 @@ func (t *rcloneProgressTracker) feedLine(line string) string {
 	return t.lastBytesLine
 }
 
-// scanRcloneProgress reads rclone -P progress output, extracts progress
-// updates, and forwards each to onProgress. If onProgress is nil, the reader
-// is drained without parsing. Handles both \n and \r as line delimiters
-// because rclone uses \r for in-place updates during transfers. Returns the
-// first non-EOF read error encountered, or nil on clean EOF.
+// scanRcloneProgress drains bounded records for focused progress tests. The
+// executor uses the same capture primitive and adds statistics and log policy.
 func scanRcloneProgress(r io.Reader, onProgress func(string)) error {
-	if onProgress == nil {
-		_, err := io.Copy(io.Discard, r)
-		return err
-	}
-
 	var tracker rcloneProgressTracker
-	scanner := bufio.NewScanner(r)
-	scanner.Split(splitOnCROrLF)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	return captureDelimitedRecords(r, func(record string) {
+		if onProgress == nil {
+			return
 		}
-		if progress := tracker.feedLine(string(line)); progress != "" {
+		if progress := tracker.feedLine(record); progress != "" {
 			onProgress(progress)
 		}
-	}
-	return scanner.Err()
-}
-
-// splitOnCROrLF is a bufio.SplitFunc that returns tokens delimited by either
-// \r or \n. Used for rclone -P output, which mixes \n-terminated log lines
-// with \r-terminated in-place progress updates.
-func splitOnCROrLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	for i, b := range data {
-		if b == '\r' || b == '\n' {
-			return i + 1, data[:i], nil
-		}
-	}
-	if atEOF {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
+	})
 }
 
 // rcloneCommand builds an rclone *exec.Cmd, injecting the config password into
-// this command's environment only when one was supplied. When configPass is
+// this command's environment only when one was supplied. When configPassword is
 // empty the command inherits the ambient environment unchanged (covering both
 // the no-password case and a user-exported RCLONE_CONFIG_PASS). Callers choose
 // their own execution method on the returned command.
 func (e *RcloneExecutor) rcloneCommand(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "rclone", args...)
-	if e.configPass != "" {
-		cmd.Env = append(os.Environ(), "RCLONE_CONFIG_PASS="+e.configPass)
+	cmd := exec.CommandContext(ctx, rcloneCommandName, args...)
+	if e.configPassword != "" {
+		cmd.Env = append(
+			os.Environ(),
+			rcloneConfigPasswordEnvironment+"="+e.configPassword,
+		)
 	}
 	return cmd
 }
 
-// Exec runs rclone with the given pre-assembled argument list.
-// Stdout is piped to a goroutine that parses -P progress output. Stats are
-// parsed from the log file section written during this call.
-func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
-	// Display name from second-to-last arg (source).
+type rcloneExecution struct {
+	command     *exec.Cmd
+	stdout      io.ReadCloser
+	stderr      io.ReadCloser
+	displayName string
+	subcommand  string
+	startedAt   time.Time
+}
+
+func (e *RcloneExecutor) prepareExecution(ctx context.Context, args []string) (rcloneExecution, *ItemResult) {
 	source := ""
 	if len(args) >= 2 {
 		source = args[len(args)-2]
 	}
 	displayName := filepath.Base(strings.TrimRight(source, "/"))
-
-	logStartLine := 0
-	if e.logFile != "" {
-		logStartLine = countLines(e.logFile)
+	subcommand := rcloneCommandName
+	if len(args) > 0 {
+		subcommand += " " + args[0]
 	}
 
-	start := time.Now()
-
-	cmd := e.rcloneCommand(ctx, args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	stdout, err := cmd.StdoutPipe()
+	startedAt := e.now()
+	command := e.rcloneCommand(ctx, args...)
+	stdout, err := command.StdoutPipe()
 	if err != nil {
-		e.logger.FileError(fmt.Sprintf("rclone pipe setup failed for %s: %v", displayName, err))
-		return ItemResult{Name: displayName, Status: StatusFailed}
+		e.logger.FileError(fmt.Sprintf("setting up rclone stdout pipe for %s: %v", displayName, err))
+		return rcloneExecution{}, &ItemResult{Name: displayName, Status: StatusFailed}
+	}
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		e.logger.FileError(fmt.Sprintf("setting up rclone stderr pipe for %s: %v", displayName, err))
+		return rcloneExecution{}, &ItemResult{Name: displayName, Status: StatusFailed}
 	}
 
-	if err := cmd.Start(); err != nil {
+	execution := rcloneExecution{
+		command:     command,
+		stdout:      stdout,
+		stderr:      stderr,
+		displayName: displayName,
+		subcommand:  subcommand,
+		startedAt:   startedAt,
+	}
+	if err := command.Start(); err != nil {
 		status := classifyExitStatus(ctx, err)
 		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("rclone timed out for %s after per-job max_runtime: %v", displayName, err))
+			e.logger.FileError(fmt.Sprintf(
+				"rclone timed out for %s after per-job max_runtime: %v",
+				displayName,
+				err,
+			))
 		} else {
 			e.logger.FileError(fmt.Sprintf("rclone start failed for %s: %v", displayName, err))
 		}
-		return ItemResult{Name: displayName, Status: status}
+		return rcloneExecution{}, &ItemResult{Name: displayName, Status: status}
 	}
+	return execution, nil
+}
 
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(1)
-	go func() {
-		defer pipeWg.Done()
-		if scanErr := scanRcloneProgress(stdout, onProgress); scanErr != nil {
-			e.logger.FileError(fmt.Sprintf("reading rclone progress for %s: %v", displayName, scanErr))
+func rcloneStatisticsMarkerAtRecordStart(record string) string {
+	markers := []string{"Transferred:", "Checks:", "Deleted:"}
+	for _, marker := range markers {
+		if strings.HasPrefix(record, marker) {
+			return marker
 		}
-	}()
+	}
+	return ""
+}
 
-	pipeWg.Wait()
-	runErr := cmd.Wait()
-	elapsed := time.Since(start)
-
-	if stderrBuf.Len() > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(stderrBuf.String()), "\n") {
-			if line != "" {
-				e.logger.FileError(line)
+func (e *RcloneExecutor) captureStdoutRecord(
+	record string,
+	statsTail *tailBuffer,
+	tracker *rcloneProgressTracker,
+	onProgress func(string),
+) {
+	trimmed := strings.TrimLeftFunc(record, unicode.IsSpace)
+	if trimmed == "" {
+		return
+	}
+	if trimmed[0] == '{' {
+		e.logger.FileTool(log.ToolRclone, trimmed)
+		return
+	}
+	if marker := rcloneStatisticsMarkerAtRecordStart(trimmed); marker != "" {
+		normalized := strings.TrimSpace(trimmed)
+		_, _ = io.WriteString(statsTail, normalized+"\n")
+		if marker == "Transferred:" && strings.Contains(normalized, "/s") && onProgress != nil {
+			if progress := tracker.feedLine(normalized); progress != "" {
+				onProgress(progress)
 			}
 		}
+		return
 	}
 
-	var stats TransferStats
-	if e.logFile != "" {
-		logSection := readLinesAfter(e.logFile, logStartLine)
-		stats = ParseRcloneStats(logSection)
+	position := strings.LastIndex(trimmed, "Transferred:")
+	if position <= 0 {
+		e.logger.FileTool(log.ToolRclone, trimmed)
+		return
 	}
+	progressRecord := trimmed[position:]
+	if !strings.Contains(progressRecord, "/s") {
+		e.logger.FileTool(log.ToolRclone, trimmed)
+		return
+	}
+	if onProgress == nil {
+		return
+	}
+	progress := tracker.feedLine(progressRecord)
+	if progress == "" {
+		return
+	}
+	onProgress(progress)
+}
+
+func (e *RcloneExecutor) logExecutionFailure(
+	ctx context.Context,
+	execution rcloneExecution,
+	runError error,
+	firstStderr string,
+) Status {
+	status := classifyExitStatus(ctx, runError)
+	if runError == nil {
+		return status
+	}
+	detail := ""
+	if firstStderr != "" {
+		detail = " (" + firstStderr + ")"
+	}
+	if status == StatusTimedOut {
+		e.logger.FileError(fmt.Sprintf(
+			"%s timed out for %s after per-job max_runtime: %v%s",
+			execution.subcommand,
+			execution.displayName,
+			runError,
+			detail,
+		))
+	} else {
+		e.logger.FileError(fmt.Sprintf(
+			"%s failed for %s: %v%s",
+			execution.subcommand,
+			execution.displayName,
+			runError,
+			detail,
+		))
+	}
+	return status
+}
+
+// Exec keeps rclone process I/O behind the executor by draining both streams,
+// framing diagnostics, forwarding progress, and parsing only bounded records
+// captured during this command.
+func (e *RcloneExecutor) Exec(ctx context.Context, args []string, onProgress func(string)) ItemResult {
+	execution, failure := e.prepareExecution(ctx, args)
+	if failure != nil {
+		return *failure
+	}
+
+	statsTail := newTailBuffer(statisticsTailBytes)
+	tracker := &rcloneProgressTracker{}
+	var firstStderr string
+	var stdoutReadErr, stderrReadErr error
+	var drains sync.WaitGroup
+	drains.Add(2)
+	go func() {
+		defer drains.Done()
+		stdoutReadErr = captureDelimitedRecords(execution.stdout, func(record string) {
+			e.captureStdoutRecord(record, statsTail, tracker, onProgress)
+		})
+	}()
+	go func() {
+		defer drains.Done()
+		stderrReadErr = captureDelimitedRecords(execution.stderr, func(record string) {
+			if firstStderr == "" {
+				firstStderr = record
+			}
+			e.logger.FileTool(log.ToolRclone, record)
+		})
+	}()
+	drains.Wait()
+	runError := execution.command.Wait()
+	elapsed := e.now().Sub(execution.startedAt)
+
+	if stdoutReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading rclone stdout for %s: %v",
+			execution.displayName,
+			stdoutReadErr,
+		))
+	}
+	if stderrReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading rclone stderr for %s: %v",
+			execution.displayName,
+			stderrReadErr,
+		))
+	}
+
+	stats := ParseRcloneStats(statsTail.Bytes())
 	stats.Elapsed = elapsed
-
-	status := classifyExitStatus(ctx, runErr)
-	if runErr != nil {
-		subcommand := "rclone"
-		if len(args) > 0 {
-			subcommand = "rclone " + args[0]
-		}
-		if status == StatusTimedOut {
-			e.logger.FileError(fmt.Sprintf("%s timed out for %s after per-job max_runtime: %v", subcommand, displayName, runErr))
-		} else {
-			e.logger.FileError(fmt.Sprintf("%s failed for %s: %v", subcommand, displayName, runErr))
-		}
-	}
-
-	return ItemResult{Name: displayName, Status: status, Stats: stats}
+	status := e.logExecutionFailure(ctx, execution, runError, firstStderr)
+	return ItemResult{Name: execution.displayName, Status: status, Stats: stats}
 }
 
 // modeRequest carries the inputs selectMode needs to pick the rclone
@@ -223,7 +345,7 @@ type modeRequest struct {
 // configured, the backup-dir is constructed as:
 //
 //	remote:<backup_path>/<run_timestamp>/<dest_subpath>/
-func selectMode(req modeRequest, logger *log.Logger) (subcommand, backupDirArg string) {
+func selectMode(req modeRequest, logger InformationLogger) (subcommand, backupDirArg string) {
 	if req.Mode == config.ModeCopy || !req.IsDir {
 		if req.Mode == config.ModeSync && !req.IsDir {
 			logger.Info("mode is 'sync' but source is a file; using 'rclone copy'")
@@ -280,130 +402,284 @@ func isDirNotFound(err error) bool {
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == rcloneExitDirNotFound
 }
 
-// firstStderrLine returns the first stderr line captured by Output(), or ""
-// when stderr was empty (rclone routes error text to --log-file when set,
-// leaving stderr blank in normal runs).
-func firstStderrLine(err error) string {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || len(exitErr.Stderr) == 0 {
-		return ""
-	}
-	return oneLine(string(exitErr.Stderr))
+func (e *RcloneExecutor) captureToolRecords(
+	reader io.Reader,
+	firstRecord *string,
+) error {
+	return captureDelimitedRecords(reader, func(record string) {
+		if firstRecord != nil && *firstRecord == "" {
+			*firstRecord = record
+		}
+		e.logger.FileTool(log.ToolRclone, record)
+	})
 }
 
-// purgeArchiveDir runs rclone purge for one expired archive directory,
-// mirroring the lsd call's log-file routing. The caller decides how to
-// handle a failure (warn and continue).
+// purgeArchiveDir runs rclone purge for one expired archive directory. The
+// caller decides how to handle a process failure.
 func (e *RcloneExecutor) purgeArchiveDir(ctx context.Context, target string) error {
 	purgeArgs := []string{"purge", target}
-	if e.logFile != "" {
-		purgeArgs = append(purgeArgs, "--log-file", e.logFile, "--log-level", "INFO")
+	command := e.rcloneCommand(ctx, purgeArgs...)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("setting up purge stdout pipe for %s: %w", target, err)
 	}
-	return e.rcloneCommand(ctx, purgeArgs...).Run()
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("setting up purge stderr pipe for %s: %w", target, err)
+	}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("starting purge for %s: %w", target, err)
+	}
+
+	var stdoutReadErr, stderrReadErr error
+	var firstStderr string
+	var drains sync.WaitGroup
+	drains.Add(2)
+	go func() {
+		defer drains.Done()
+		stdoutReadErr = e.captureToolRecords(stdout, nil)
+	}()
+	go func() {
+		defer drains.Done()
+		stderrReadErr = e.captureToolRecords(stderr, &firstStderr)
+	}()
+	drains.Wait()
+	processErr := command.Wait()
+
+	if stdoutReadErr != nil {
+		e.logger.FileError(fmt.Sprintf("reading purge stdout for %s: %v", target, stdoutReadErr))
+	}
+	if stderrReadErr != nil {
+		e.logger.FileError(fmt.Sprintf("reading purge stderr for %s: %v", target, stderrReadErr))
+	}
+	if processErr == nil {
+		return nil
+	}
+	if firstStderr != "" {
+		return fmt.Errorf("purging archive directory %s: %w (%s)", target, processErr, firstStderr)
+	}
+	return fmt.Errorf("purging archive directory %s: %w", target, processErr)
 }
 
-// CleanupArchives purges archive subdirectories older than retentionDays
-// from the backup root on the given remote. Individual purge failures are
+// CleanupArchives purges archive subdirectories older than the requested
+// retention from the selected remote. Individual purge failures are
 // logged as warnings and do not stop processing of remaining directories,
 // but a failure to list the backup root at all is returned as an error so
 // the caller can surface it; a missing backup root (rclone exit 3) is the
 // expected first-run state and stays a non-error. Skipped during dry-run,
-// when backupPath is empty, or when retentionDays is non-positive.
-func (e *RcloneExecutor) CleanupArchives(ctx context.Context, remoteName, backupPath string, retentionDays int, dryRun bool) error {
-	if backupPath == "" || retentionDays <= 0 || dryRun {
+// when the backup path is empty, or when retention is non-positive.
+func (e *RcloneExecutor) CleanupArchives(ctx context.Context, request ArchiveCleanupRequest) error {
+	plan, shouldRun := prepareArchiveCleanup(request, e.now())
+	if !shouldRun {
 		return nil
 	}
-
-	cutoff := time.Now().AddDate(0, 0, -retentionDays).Format(archiveDateLayout)
-	archiveRoot := fmt.Sprintf("%s:%s", remoteName, strings.TrimRight(backupPath, "/"))
-
-	lsdArgs := []string{"lsd", archiveRoot + "/"}
-	if e.logFile != "" {
-		lsdArgs = append(lsdArgs, "--log-file", e.logFile, "--log-level", "INFO")
-	}
-	output, err := e.rcloneCommand(ctx, lsdArgs...).Output()
+	listing, err := e.readArchiveDirectoryListing(ctx, plan)
 	if err != nil {
-		if isDirNotFound(err) {
-			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", remoteName))
-			return nil
+		return err
+	}
+	return e.purgeExpiredArchiveDirectories(ctx, archivePurgeRequest{
+		plan:    plan,
+		listing: bytes.NewReader(listing),
+		purge:   e.purgeArchiveDir,
+	})
+}
+
+type archiveCleanupPlan struct {
+	remoteName  string
+	archiveRoot string
+	cutoff      string
+}
+
+func prepareArchiveCleanup(
+	request ArchiveCleanupRequest,
+	now time.Time,
+) (archiveCleanupPlan, bool) {
+	if request.BackupPath == "" || request.RetentionDays <= 0 || request.DryRun {
+		return archiveCleanupPlan{}, false
+	}
+	return archiveCleanupPlan{
+		remoteName:  request.RemoteName,
+		archiveRoot: fmt.Sprintf("%s:%s", request.RemoteName, strings.TrimRight(request.BackupPath, "/")),
+		cutoff:      now.AddDate(0, 0, -request.RetentionDays).Format(archiveDateLayout),
+	}, true
+}
+
+func (e *RcloneExecutor) drainArchiveListing(
+	stdout io.Reader,
+	stderr io.Reader,
+) (listing []byte, firstStderr string, stdoutReadErr, stderrReadErr error) {
+	var drains sync.WaitGroup
+	drains.Add(2)
+	go func() {
+		defer drains.Done()
+		limited := io.LimitReader(stdout, archiveListingLimitBytes+1)
+		listing, stdoutReadErr = io.ReadAll(limited)
+		if len(listing) <= archiveListingLimitBytes {
+			return
 		}
-		if detail := firstStderrLine(err); detail != "" {
-			return fmt.Errorf("listing archive root %s: %w (%s)", archiveRoot, err, detail)
-		}
-		return fmt.Errorf("listing archive root %s: %w", archiveRoot, err)
+		listing = listing[:archiveListingLimitBytes]
+		_, drainErr := io.Copy(io.Discard, stdout)
+		stdoutReadErr = errors.Join(
+			stdoutReadErr,
+			drainErr,
+			fmt.Errorf(
+				"archive listing exceeds %d byte limit",
+				archiveListingLimitBytes,
+			),
+		)
+	}()
+	go func() {
+		defer drains.Done()
+		stderrReadErr = e.captureToolRecords(stderr, &firstStderr)
+	}()
+	drains.Wait()
+	return listing, firstStderr, stdoutReadErr, stderrReadErr
+}
+
+func (e *RcloneExecutor) archiveListingReadError(
+	plan archiveCleanupPlan,
+	stdoutReadErr error,
+	stderrReadErr error,
+) error {
+	var readErrors []error
+	if stdoutReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading archive listing stdout for %s: %v",
+			plan.archiveRoot,
+			stdoutReadErr,
+		))
+		readErrors = append(
+			readErrors,
+			fmt.Errorf(
+				"reading archive listing stdout for %s: %w",
+				plan.archiveRoot,
+				stdoutReadErr,
+			),
+		)
+	}
+	if stderrReadErr != nil {
+		e.logger.FileError(fmt.Sprintf(
+			"reading archive listing stderr for %s: %v",
+			plan.archiveRoot,
+			stderrReadErr,
+		))
+		readErrors = append(
+			readErrors,
+			fmt.Errorf(
+				"reading archive listing stderr for %s: %w",
+				plan.archiveRoot,
+				stderrReadErr,
+			),
+		)
+	}
+	return errors.Join(readErrors...)
+}
+
+func (e *RcloneExecutor) readArchiveDirectoryListing(
+	ctx context.Context,
+	plan archiveCleanupPlan,
+) ([]byte, error) {
+	lsdArgs := []string{"lsd", plan.archiveRoot + "/"}
+	command := e.rcloneCommand(ctx, lsdArgs...)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("setting up archive listing stdout pipe for %s: %w", plan.archiveRoot, err)
+	}
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("setting up archive listing stderr pipe for %s: %w", plan.archiveRoot, err)
+	}
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("starting archive listing for %s: %w", plan.archiveRoot, err)
 	}
 
-	purged := 0
-	scanner := bufio.NewScanner(bytes.NewReader(output))
+	listing, firstStderr, stdoutReadErr, stderrReadErr := e.drainArchiveListing(stdout, stderr)
+	processErr := command.Wait()
+	readErr := e.archiveListingReadError(plan, stdoutReadErr, stderrReadErr)
+	if processErr != nil {
+		if isDirNotFound(processErr) {
+			e.logger.Info(fmt.Sprintf("no archive directory on %s (nothing to clean)", plan.remoteName))
+			return nil, nil
+		}
+		if firstStderr != "" {
+			return nil, fmt.Errorf(
+				"listing archive root %s: %w (%s)",
+				plan.archiveRoot,
+				processErr,
+				firstStderr,
+			)
+		}
+		return nil, fmt.Errorf("listing archive root %s: %w", plan.archiveRoot, processErr)
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	return listing, nil
+}
+
+type archivePurgeRequest struct {
+	plan    archiveCleanupPlan
+	listing io.Reader
+	purge   func(context.Context, string) error
+}
+
+func (e *RcloneExecutor) purgeExpiredArchiveDirectories(
+	ctx context.Context,
+	request archivePurgeRequest,
+) error {
+	type expiredArchiveDirectory struct {
+		name   string
+		target string
+	}
+	var expiredDirectories []expiredArchiveDirectory
+	scanner := bufio.NewScanner(request.listing)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 0 {
 			continue
 		}
-		dirName := fields[len(fields)-1]
-		expired, recognized := archiveDirExpired(dirName, cutoff)
+		directory := fields[len(fields)-1]
+		expired, recognized := archiveDirExpired(directory, request.plan.cutoff)
 		if !recognized {
-			e.logger.Warn(fmt.Sprintf("archive cleanup: skipping unrecognized directory %s on %s", dirName, remoteName))
+			e.logger.Warn(fmt.Sprintf(
+				"archive cleanup: skipping unrecognized directory %s on %s",
+				directory,
+				request.plan.remoteName,
+			))
 			continue
 		}
 		if !expired {
 			continue
 		}
-		target := archiveRoot + "/" + dirName
-		e.logger.Info(fmt.Sprintf("purging expired archive: %s (%s < %s)", target, dirName[:len(archiveDateLayout)], cutoff))
-		if purgeErr := e.purgeArchiveDir(ctx, target); purgeErr != nil {
-			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", target, purgeErr))
+		expiredDirectories = append(expiredDirectories, expiredArchiveDirectory{
+			name:   directory,
+			target: request.plan.archiveRoot + "/" + directory,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanning archive listing for %s: %w", request.plan.archiveRoot, err)
+	}
+
+	purged := 0
+	for _, directory := range expiredDirectories {
+		e.logger.Info(fmt.Sprintf(
+			"purging expired archive: %s (%s < %s)",
+			directory.target,
+			directory.name[:len(archiveDateLayout)],
+			request.plan.cutoff,
+		))
+		if purgeErr := request.purge(ctx, directory.target); purgeErr != nil {
+			e.logger.Warn(fmt.Sprintf("failed to purge %s: %v", directory.target, purgeErr))
 		} else {
 			purged++
 		}
 	}
-	if scanErr := scanner.Err(); scanErr != nil {
-		return fmt.Errorf("scanning archive listing for %s: %w", archiveRoot, scanErr)
-	}
-
 	if purged > 0 {
-		e.logger.Info(fmt.Sprintf("archive cleanup: purged %d expired director(ies) from %s", purged, remoteName))
+		e.logger.Info(fmt.Sprintf(
+			"archive cleanup: purged %d expired director(ies) from %s",
+			purged,
+			request.plan.remoteName,
+		))
 	}
 	return nil
-}
-
-// countLines counts the number of newline-terminated lines in the file at path.
-// Returns 0 if the file cannot be opened, so callers can safely treat a missing
-// log file as having zero pre-existing lines.
-func countLines(path string) int {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
-	defer func() { _ = f.Close() }()
-	count := 0
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		count++
-	}
-	return count
-}
-
-// readLinesAfter reads all lines from the file at path that come after
-// startLine (1-based). Used to extract the log section written during a single
-// rclone call for stats parsing without re-reading lines from prior calls.
-// Returns nil if the file cannot be opened.
-func readLinesAfter(path string, startLine int) []byte {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = f.Close() }()
-
-	var result []byte
-	scanner := bufio.NewScanner(f)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		if lineNum > startLine {
-			result = append(result, scanner.Bytes()...)
-			result = append(result, '\n')
-		}
-	}
-	return result
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -41,98 +42,457 @@ func TestValidateJobNames_SkipAndOnlyConflict(t *testing.T) {
 	}
 }
 
-func TestShouldRunJob_SkipLogic(t *testing.T) {
-	tests := []struct {
-		name    string
-		skip    []string
-		only    []string
-		jobName string
-		wantRun bool
-	}{
-		{"no filters", nil, nil, "photos", true},
-		{"skip photos", []string{"photos"}, nil, "photos", false},
-		{"skip photos, run projects", []string{"photos"}, nil, "projects", true},
-		{"only docs", nil, []string{"docs"}, "photos", false},
-		{"only photos", nil, []string{"photos"}, "photos", true},
+type stubRunnerLogger struct{}
+
+func (l *stubRunnerLogger) Header(string)     {}
+func (l *stubRunnerLogger) Info(string)       {}
+func (l *stubRunnerLogger) Success(string)    {}
+func (l *stubRunnerLogger) Warn(string)       {}
+func (l *stubRunnerLogger) Error(string)      {}
+func (l *stubRunnerLogger) Debug(string)      {}
+func (l *stubRunnerLogger) FileHeader(string) {}
+func (l *stubRunnerLogger) FileInfo(string)   {}
+func (l *stubRunnerLogger) FileWarn(string)   {}
+func (l *stubRunnerLogger) FileError(string)  {}
+
+type stubRunnerProgress struct{}
+
+func (*stubRunnerProgress) Interactive() bool                { return false }
+func (*stubRunnerProgress) SkipJob(string)                   {}
+func (*stubRunnerProgress) StartJob(context.Context, string) {}
+func (*stubRunnerProgress) ProgressCallback() func(string)   { return nil }
+func (*stubRunnerProgress) FinishJob(ItemResult)             {}
+
+type stubPrerequisiteChecker struct {
+	requests []PrerequisiteRequest
+	err      error
+	events   *[]string
+}
+
+func (s *stubPrerequisiteChecker) Check(request PrerequisiteRequest) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "prerequisites")
 	}
+	request.FilterFiles = append([]string(nil), request.FilterFiles...)
+	s.requests = append(s.requests, request)
+	return s.err
+}
+
+type stubRunLocker struct {
+	configPaths  []string
+	acquireErr   error
+	releaseErr   error
+	releaseCalls int
+	events       *[]string
+}
+
+func (s *stubRunLocker) Acquire(configPath string) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "acquire")
+	}
+	s.configPaths = append(s.configPaths, configPath)
+	return s.acquireErr
+}
+
+func (s *stubRunLocker) Release() error {
+	if s.events != nil {
+		*s.events = append(*s.events, "release")
+	}
+	s.releaseCalls++
+	return s.releaseErr
+}
+
+type stubRsyncCommandExecutor struct {
+	calls  int
+	args   [][]string
+	events *[]string
+}
+
+func (s *stubRsyncCommandExecutor) Exec(_ context.Context, args []string, _ func(string)) ItemResult {
+	if s.events != nil {
+		*s.events = append(*s.events, "rsync")
+	}
+	s.calls++
+	s.args = append(s.args, append([]string(nil), args...))
+	return ItemResult{Status: StatusOK}
+}
+
+type stubRcloneCommandExecutor struct {
+	events *[]string
+}
+
+func (s *stubRcloneCommandExecutor) Exec(context.Context, []string, func(string)) ItemResult {
+	if s.events != nil {
+		*s.events = append(*s.events, "rclone")
+	}
+	return ItemResult{Status: StatusOK}
+}
+
+func (s *stubRcloneCommandExecutor) CleanupArchives(context.Context, ArchiveCleanupRequest) error {
+	if s.events != nil {
+		*s.events = append(*s.events, "cleanup")
+	}
+	return nil
+}
+
+func buildTestRunPlan(t *testing.T, cfg *config.Config, options RunOptions) RunPlan {
+	t.Helper()
+	plan, err := BuildRunPlan(cfg, options)
+	if err != nil {
+		t.Fatalf("BuildRunPlan() error = %v", err)
+	}
+	return plan
+}
+
+func validRunnerConfig(t *testing.T, plan RunPlan) RunnerConfig {
+	t.Helper()
+	return RunnerConfig{
+		Plan:          plan,
+		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
+		Logger:        &stubRunnerLogger{},
+		Progress:      &stubRunnerProgress{},
+		Prerequisites: &stubPrerequisiteChecker{},
+		Locker:        &stubRunLocker{},
+		Rsync:         &stubRsyncCommandExecutor{},
+		Rclone:        &stubRcloneCommandExecutor{},
+	}
+}
+
+func baselineRunPlan(t *testing.T) RunPlan {
+	t.Helper()
+	return buildTestRunPlan(t, &config.Config{Jobs: []config.Job{{
+		Name:        "baseline",
+		Engine:      config.EngineRsync,
+		Sources:     []string{filepath.Join(t.TempDir(), "missing")},
+		Destination: t.TempDir(),
+		Optional:    true,
+	}}}, RunOptions{})
+}
+
+func TestNewRunner_InvalidInput_ReturnsContextualError(t *testing.T) {
+	tests := []struct {
+		name      string
+		change    func(*RunnerConfig)
+		wantError string
+	}{
+		{
+			name:      "zero plan",
+			change:    func(rc *RunnerConfig) { rc.Plan = RunPlan{} },
+			wantError: "invalid run plan",
+		},
+		{
+			name:      "empty config path",
+			change:    func(rc *RunnerConfig) { rc.ConfigPath = "" },
+			wantError: "config path",
+		},
+		{
+			name:      "relative config path",
+			change:    func(rc *RunnerConfig) { rc.ConfigPath = "config.toml" },
+			wantError: "config path",
+		},
+		{
+			name:      "nil logger",
+			change:    func(rc *RunnerConfig) { rc.Logger = nil },
+			wantError: "logger",
+		},
+		{
+			name:      "nil progress",
+			change:    func(rc *RunnerConfig) { rc.Progress = nil },
+			wantError: "progress",
+		},
+		{
+			name:      "nil prerequisites",
+			change:    func(rc *RunnerConfig) { rc.Prerequisites = nil },
+			wantError: "prerequisites",
+		},
+		{
+			name:      "nil locker",
+			change:    func(rc *RunnerConfig) { rc.Locker = nil },
+			wantError: "locker",
+		},
+		{
+			name:      "nil rsync",
+			change:    func(rc *RunnerConfig) { rc.Rsync = nil },
+			wantError: "rsync",
+		},
+		{
+			name:      "nil rclone",
+			change:    func(rc *RunnerConfig) { rc.Rclone = nil },
+			wantError: "rclone",
+		},
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRunJob(tt.jobName, tt.skip, tt.only)
-			if got != tt.wantRun {
-				t.Errorf("shouldRunJob(%q) = %v, want %v", tt.jobName, got, tt.wantRun)
+			rc := validRunnerConfig(t, baselineRunPlan(t))
+			tt.change(&rc)
+
+			runner, err := NewRunner(rc)
+
+			if err == nil {
+				t.Fatalf("NewRunner() = (%v, nil), want contextual error", runner)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.wantError)
+			}
+			if tt.name == "zero plan" && !errors.Is(err, ErrInvalidRunPlan) {
+				t.Errorf("error = %v, want it to wrap ErrInvalidRunPlan", err)
 			}
 		})
 	}
 }
 
-// xdgRuntimeDir returns a fresh 0700 directory and points XDG_RUNTIME_DIR at it
-// for the test's duration. t.TempDir() yields a 0755 directory on some
-// platforms, which lockDir now rejects (it verifies XDG_RUNTIME_DIR to the same
-// fail-closed bar as the fallback, matching the real XDG 0700 contract), so the
-// perms are tightened explicitly here.
-func xdgRuntimeDir(t *testing.T) string {
+func TestNewRunner_TypedNilPorts_ReturnPlainNilErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		change    func(*RunnerConfig)
+		wantError string
+	}{
+		{
+			name: "logger",
+			change: func(rc *RunnerConfig) {
+				var logger *stubRunnerLogger
+				rc.Logger = logger
+			},
+			wantError: "invalid runner config: logger is nil",
+		},
+		{
+			name: "progress",
+			change: func(rc *RunnerConfig) {
+				var progress *stubRunnerProgress
+				rc.Progress = progress
+			},
+			wantError: "invalid runner config: progress is nil",
+		},
+		{
+			name: "prerequisites",
+			change: func(rc *RunnerConfig) {
+				var prerequisites *stubPrerequisiteChecker
+				rc.Prerequisites = prerequisites
+			},
+			wantError: "invalid runner config: prerequisites is nil",
+		},
+		{
+			name: "locker",
+			change: func(rc *RunnerConfig) {
+				var locker *stubRunLocker
+				rc.Locker = locker
+			},
+			wantError: "invalid runner config: locker is nil",
+		},
+		{
+			name: "rsync",
+			change: func(rc *RunnerConfig) {
+				var rsync *stubRsyncCommandExecutor
+				rc.Rsync = rsync
+			},
+			wantError: "invalid runner config: rsync executor is nil",
+		},
+		{
+			name: "rclone",
+			change: func(rc *RunnerConfig) {
+				var rclone *stubRcloneCommandExecutor
+				rc.Rclone = rclone
+			},
+			wantError: "invalid runner config: rclone executor is nil",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runnerConfig := validRunnerConfig(t, baselineRunPlan(t))
+			test.change(&runnerConfig)
+
+			assertNewRunnerRejectsTypedNil(t, runnerConfig, test.wantError)
+		})
+	}
+}
+
+func assertNewRunnerRejectsTypedNil(t *testing.T, runnerConfig RunnerConfig, wantError string) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("chmod runtime dir: %v", err)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Errorf("NewRunner() panicked for typed nil port: %v", recovered)
+		}
+	}()
+
+	runner, err := NewRunner(runnerConfig)
+	if err == nil {
+		t.Fatalf("NewRunner() = (%v, nil), want %q", runner, wantError)
 	}
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	return dir
+	if err.Error() != wantError {
+		t.Errorf("NewRunner() error = %q, want %q", err, wantError)
+	}
 }
 
-func TestLockFilePath_DifferentConfigs(t *testing.T) {
-	runtimeDir := xdgRuntimeDir(t)
-
-	r1 := &Runner{configPath: "/home/user/.config/shuttle/config.toml"}
-	r2 := &Runner{configPath: "/home/user/alt/shuttle/config.toml"}
-	r3 := &Runner{configPath: "/home/user/.config/shuttle/config.toml"}
-
-	p1, err := r1.lockFilePath()
+func TestRunner_Run_UsesInjectedRsyncExecutor(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	cfg := &config.Config{
+		Jobs: []config.Job{{
+			Name:        "documents",
+			Engine:      config.EngineRsync,
+			Sources:     []string{source},
+			Destination: destination,
+		}},
+	}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
+	prerequisites := rc.Prerequisites.(*stubPrerequisiteChecker)
+	locker := rc.Locker.(*stubRunLocker)
+	rsync := rc.Rsync.(*stubRsyncCommandExecutor)
+	runner, err := NewRunner(rc)
 	if err != nil {
-		t.Fatalf("lockFilePath r1: %v", err)
+		t.Fatalf("NewRunner() error = %v", err)
 	}
-	p2, err := r2.lockFilePath()
+
+	summary, err := runner.Run(context.Background())
+
 	if err != nil {
-		t.Fatalf("lockFilePath r2: %v", err)
+		t.Fatalf("Run() error = %v", err)
 	}
-	p3, err := r3.lockFilePath()
+	if rsync.calls != 1 {
+		t.Errorf("rsync calls = %d, want 1", rsync.calls)
+	}
+	if len(prerequisites.requests) != 1 {
+		t.Errorf("prerequisite checks = %d, want 1", len(prerequisites.requests))
+	}
+	if len(locker.configPaths) != 1 {
+		t.Errorf("lock acquisitions = %d, want 1", len(locker.configPaths))
+	}
+	if locker.releaseCalls != 1 {
+		t.Errorf("lock releases = %d, want 1", locker.releaseCalls)
+	}
+	if got := summary.Jobs[0].Items[0].Status; got != StatusOK {
+		t.Errorf("status = %q, want %q", got, StatusOK)
+	}
+}
+
+func TestRunner_Run_BoundaryOrder(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:                "cloud",
+		Engine:              config.EngineRclone,
+		Source:              t.TempDir(),
+		Remotes:             []string{"remote"},
+		Mode:                config.ModeCopy,
+		BackupPath:          "archive",
+		BackupRetentionDays: 30,
+	}}}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
+	var events []string
+	rc.Prerequisites = &stubPrerequisiteChecker{events: &events}
+	rc.Locker = &stubRunLocker{events: &events}
+	rc.Rclone = &stubRcloneCommandExecutor{events: &events}
+	runner, err := NewRunner(rc)
 	if err != nil {
-		t.Fatalf("lockFilePath r3: %v", err)
+		t.Fatalf("NewRunner() error = %v", err)
 	}
 
-	if p1 == p2 {
-		t.Error("different config paths should produce different lock paths")
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
-	if p1 != p3 {
-		t.Error("same config path should produce same lock path")
-	}
-	wantPrefix := filepath.Join(runtimeDir, "shuttle-")
-	if !strings.HasPrefix(p1, wantPrefix) {
-		t.Errorf("lock path should start with %q, got %q", wantPrefix, p1)
+
+	want := []string{"prerequisites", "acquire", "cleanup", "rclone", "release"}
+	if !slices.Equal(events, want) {
+		t.Errorf("boundary order = %v, want %v", events, want)
 	}
 }
 
-func TestTargetRemotes_NoSelection(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive", "koofr"}, nil)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 remotes, got %d", len(got))
+func TestRunner_Run_BoundaryFailuresShortCircuit(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:        "local",
+		Engine:      config.EngineRsync,
+		Sources:     []string{t.TempDir()},
+		Destination: t.TempDir(),
+	}}}
+	plan := buildTestRunPlan(t, cfg, RunOptions{})
+	prerequisiteErr := errors.New("prerequisite failure")
+	lockErr := errors.New("lock failure")
+	tests := []struct {
+		name             string
+		prerequisiteErr  error
+		lockErr          error
+		wantErr          error
+		wantEvents       []string
+		wantReleaseCalls int
+	}{
+		{
+			name:            "prerequisite failure",
+			prerequisiteErr: prerequisiteErr,
+			wantErr:         prerequisiteErr,
+			wantEvents:      []string{"prerequisites"},
+		},
+		{
+			name:       "lock failure",
+			lockErr:    lockErr,
+			wantErr:    lockErr,
+			wantEvents: []string{"prerequisites", "acquire"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rc := validRunnerConfig(t, plan)
+			var events []string
+			locker := &stubRunLocker{
+				acquireErr: test.lockErr,
+				events:     &events,
+			}
+			rc.Prerequisites = &stubPrerequisiteChecker{
+				err:    test.prerequisiteErr,
+				events: &events,
+			}
+			rc.Locker = locker
+			rc.Rsync = &stubRsyncCommandExecutor{events: &events}
+			runner, err := NewRunner(rc)
+			if err != nil {
+				t.Fatalf("NewRunner() error = %v", err)
+			}
+
+			_, err = runner.Run(context.Background())
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("Run() error = %v, want %v", err, test.wantErr)
+			}
+			if !slices.Equal(events, test.wantEvents) {
+				t.Errorf("boundary events = %v, want %v", events, test.wantEvents)
+			}
+			if locker.releaseCalls != test.wantReleaseCalls {
+				t.Errorf(
+					"release calls = %d, want %d",
+					locker.releaseCalls,
+					test.wantReleaseCalls,
+				)
+			}
+		})
 	}
 }
 
-func TestTargetRemotes_WithSelection(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive", "koofr"}, []string{"gdrive"})
-	if len(got) != 1 || got[0] != "gdrive" {
-		t.Errorf("expected [gdrive], got %v", got)
+func TestRunner_Run_ReturnsReleaseFailureAfterExecution(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{
+		Name:        "local",
+		Engine:      config.EngineRsync,
+		Sources:     []string{t.TempDir()},
+		Destination: t.TempDir(),
+	}}}
+	rc := validRunnerConfig(t, buildTestRunPlan(t, cfg, RunOptions{}))
+	releaseErr := errors.New("release failure")
+	locker := &stubRunLocker{releaseErr: releaseErr}
+	rc.Locker = locker
+	runner, err := NewRunner(rc)
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
 	}
-}
 
-func TestTargetRemotes_SelectionNotInJob(t *testing.T) {
-	r := &Runner{}
-	got := r.targetRemotes([]string{"gdrive"}, []string{"onedrive"})
-	if len(got) != 0 {
-		t.Errorf("expected empty (no overlap), got %v", got)
+	summary, err := runner.Run(context.Background())
+
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("Run() error = %v, want release failure", err)
+	}
+	if len(summary.Jobs) != 1 || summary.Jobs[0].Items[0].Status != StatusOK {
+		t.Errorf("Run() summary = %+v, want completed job before release failure", summary)
+	}
+	if locker.releaseCalls != 1 {
+		t.Errorf("release calls = %d, want 1", locker.releaseCalls)
 	}
 }
 
@@ -145,12 +505,29 @@ func TestTargetRemotes_SelectionNotInJob(t *testing.T) {
 func newTestRunner(t *testing.T, termBuf *bytes.Buffer) *Runner {
 	t.Helper()
 	logFile := filepath.Join(t.TempDir(), "test.log")
-	logger, err := log.NewWithWriter(termBuf, logFile, false, log.VerbosityNormal)
+	logger, err := log.NewWithWriter(termBuf, logFile, log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("creating logger: %v", err)
 	}
-	pw := NewProgressWriter(io.Discard, false, false)
-	return NewRunner(RunnerConfig{Cfg: &config.Config{}, Logger: logger, Progress: pw, LogFile: logFile})
+	t.Cleanup(logger.Close)
+	pw := NewProgressWriter(io.Discard, ProgressOptions{})
+	runner, err := NewRunner(RunnerConfig{
+		Plan:          baselineRunPlan(t),
+		ConfigPath:    filepath.Join(t.TempDir(), "config.toml"),
+		Logger:        logger,
+		Progress:      pw,
+		Prerequisites: &stubPrerequisiteChecker{},
+		Locker:        &stubRunLocker{},
+		Rsync:         NewRsyncExecutor(logger),
+		Rclone:        NewRcloneExecutor(logger, ""),
+	})
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	return runner
 }
 
 func TestRunRsyncJob_Optional_MissingSource_MarksOptionalMissing(t *testing.T) {
@@ -266,7 +643,11 @@ func TestRunRcloneJob_Optional_MissingLocalSource_MarksOptionalMissing(t *testin
 		Optional: true,
 	}
 
-	result := r.runRcloneJob(context.Background(), job, "crypt_gdrive", "2026-04-16_120000")
+	result := r.runRcloneJob(context.Background(), rcloneJobRequest{
+		job:          job,
+		remoteName:   "crypt_gdrive",
+		runTimestamp: "2026-04-16_120000",
+	})
 
 	if len(result.Items) != 1 {
 		t.Fatalf("Items count = %d, want 1", len(result.Items))
@@ -296,7 +677,11 @@ func TestRunRcloneJob_NotOptional_MissingLocalSource_MarksNotFound(t *testing.T)
 		Mode:    config.ModeCopy,
 	}
 
-	result := r.runRcloneJob(context.Background(), job, "crypt_gdrive", "2026-04-16_120000")
+	result := r.runRcloneJob(context.Background(), rcloneJobRequest{
+		job:          job,
+		remoteName:   "crypt_gdrive",
+		runTimestamp: "2026-04-16_120000",
+	})
 
 	if result.Items[0].Status != StatusNotFound {
 		t.Errorf("Status = %q, want %q", result.Items[0].Status, StatusNotFound)
@@ -432,7 +817,11 @@ func TestRunRcloneJob_MaxRuntime_FiresAndReportsTimedOut(t *testing.T) {
 		MaxRuntime: "1ms",
 	}
 
-	result := r.runRcloneJob(context.Background(), job, "any-remote", "2026-04-18_000000")
+	result := r.runRcloneJob(context.Background(), rcloneJobRequest{
+		job:          job,
+		remoteName:   "any-remote",
+		runTimestamp: "2026-04-18_000000",
+	})
 
 	if len(result.Items) != 1 {
 		t.Fatalf("Items count = %d, want 1", len(result.Items))
@@ -504,106 +893,5 @@ func TestClassifyExitStatus(t *testing.T) {
 				t.Errorf("classifyExitStatus(...) = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestLockDir_HonorsXDGRuntimeDir(t *testing.T) {
-	runtimeDir := xdgRuntimeDir(t)
-	got, err := lockDir()
-	if err != nil {
-		t.Fatalf("lockDir: %v", err)
-	}
-	if got != runtimeDir {
-		t.Errorf("lockDir() = %q, want %q", got, runtimeDir)
-	}
-}
-
-func TestLockDir_RejectsInsecureXDGRuntimeDir(t *testing.T) {
-	insecure := filepath.Join(t.TempDir(), "loose")
-	if err := os.Mkdir(insecure, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.Chmod(insecure, 0o777); err != nil { // chmod defeats umask so group/other bits are actually set
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Setenv("XDG_RUNTIME_DIR", insecure)
-	if _, err := lockDir(); err == nil {
-		t.Error("lockDir should reject a group/other-accessible XDG_RUNTIME_DIR")
-	}
-}
-
-func TestLockDir_FallbackCreatesPrivateSubdir(t *testing.T) {
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	t.Setenv("TMPDIR", t.TempDir()) // os.TempDir() reads $TMPDIR
-	got, err := lockDir()
-	if err != nil {
-		t.Fatalf("lockDir: %v", err)
-	}
-	info, err := os.Lstat(got)
-	if err != nil {
-		t.Fatalf("stat lock dir: %v", err)
-	}
-	if !info.IsDir() {
-		t.Error("lock dir is not a directory")
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Errorf("lock dir perm = %o, want 700", info.Mode().Perm())
-	}
-}
-
-func TestEnsureSecureDir_RejectsInsecureDirs(t *testing.T) {
-	t.Run("fresh dir created 0700", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "lock")
-		if err := ensureSecureDir(dir); err != nil {
-			t.Fatalf("ensureSecureDir: %v", err)
-		}
-		info, _ := os.Lstat(dir)
-		if info.Mode().Perm() != 0o700 {
-			t.Errorf("perm = %o, want 700", info.Mode().Perm())
-		}
-	})
-	t.Run("group/other-accessible rejected", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "loose")
-		if err := os.Mkdir(dir, 0o777); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := ensureSecureDir(dir); err == nil {
-			t.Error("expected error for 0777 dir")
-		}
-	})
-	t.Run("symlink rejected", func(t *testing.T) {
-		target := t.TempDir()
-		link := filepath.Join(t.TempDir(), "link")
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatalf("symlink: %v", err)
-		}
-		if err := ensureSecureDir(link); err == nil {
-			t.Error("expected error for symlinked dir")
-		}
-	})
-	t.Run("non-directory rejected", func(t *testing.T) {
-		file := filepath.Join(t.TempDir(), "file")
-		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		if err := ensureSecureDir(file); err == nil {
-			t.Error("expected error for non-directory")
-		}
-	})
-}
-
-func TestAcquireLock_RejectsSymlinkedLockPath(t *testing.T) {
-	xdgRuntimeDir(t)
-	r := &Runner{configPath: "/some/config.toml"}
-	lockPath, err := r.lockFilePath()
-	if err != nil {
-		t.Fatalf("lockFilePath: %v", err)
-	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), lockPath); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	if err := r.acquireLock(); err == nil {
-		t.Error("acquireLock should reject a symlinked lock path (O_NOFOLLOW)")
-		_ = r.lockFile.Close()
 	}
 }

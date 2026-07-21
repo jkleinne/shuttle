@@ -31,11 +31,11 @@ func isRcloneRemote(source string) bool {
 // rcloneDestName determines the destination folder name for a cloud item.
 // Uses jobDest if set, otherwise derives from the source basename.
 // For remote sources (containing ':'), extracts the path after the colon.
-func rcloneDestName(jobDest, source string, isRemote bool) string {
+func rcloneDestName(jobDest, source string) string {
 	if jobDest != "" {
 		return jobDest
 	}
-	if isRemote {
+	if isRcloneRemote(source) {
 		parts := strings.SplitN(source, ":", 2)
 		if len(parts) > 1 && parts[1] != "" && parts[1] != "/" {
 			return filepath.Base(strings.TrimRight(parts[1], "/"))

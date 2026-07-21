@@ -47,43 +47,43 @@ const (
 
 // colorize wraps text in ANSI escape codes when color is enabled.
 // When disabled, returns text unchanged for plain-text output.
-func colorize(useColor bool, code, text string) string {
-	if !useColor {
+func colorize(colorMode TerminalColorMode, code, text string) string {
+	if colorMode != TerminalColorEnabled {
 		return text
 	}
 	return code + text + ansiReset
 }
 
 // statusSymbol returns a colored status indicator character.
-func statusSymbol(status Status, useColor bool) string {
+func statusSymbol(status Status, colorMode TerminalColorMode) string {
 	switch status {
 	case StatusFailed, StatusNotFound, StatusTimedOut:
-		return colorize(useColor, ansiRed, symbolFailed)
+		return colorize(colorMode, ansiRed, symbolFailed)
 	case StatusSkipped:
-		return colorize(useColor, ansiYellow, symbolSkipped)
+		return colorize(colorMode, ansiYellow, symbolSkipped)
 	case StatusOptionalMissing:
-		return colorize(useColor, ansiDim, symbolOptionalMissing)
+		return colorize(colorMode, ansiDim, symbolOptionalMissing)
 	default:
-		return colorize(useColor, ansiGreen, symbolOK)
+		return colorize(colorMode, ansiGreen, symbolOK)
 	}
 }
 
 // itemStatsText returns the formatted stats string for a single item,
 // colored by status.
-func itemStatsText(item ItemResult, useColor bool) string {
+func itemStatsText(item ItemResult, colorMode TerminalColorMode) string {
 	switch item.Status {
 	case StatusFailed:
-		return colorize(useColor, ansiRed, labelFailed)
+		return colorize(colorMode, ansiRed, labelFailed)
 	case StatusNotFound:
-		return colorize(useColor, ansiRed, labelNotFound)
+		return colorize(colorMode, ansiRed, labelNotFound)
 	case StatusTimedOut:
-		return colorize(useColor, ansiRed, labelTimedOut)
+		return colorize(colorMode, ansiRed, labelTimedOut)
 	case StatusSkipped:
-		return colorize(useColor, ansiYellow, labelSkipped)
+		return colorize(colorMode, ansiYellow, labelSkipped)
 	case StatusOptionalMissing:
-		return colorize(useColor, ansiDim, labelOptionalMissing)
+		return colorize(colorMode, ansiDim, labelOptionalMissing)
 	default:
-		return colorize(useColor, ansiDim, formatChecked(item.Stats))
+		return colorize(colorMode, ansiDim, formatChecked(item.Stats))
 	}
 }
 
@@ -212,12 +212,13 @@ func maxJobNameWidth(jobs []JobResult) int {
 	seen := make(map[string]bool)
 	maxLen := 0
 	for _, j := range jobs {
-		if seen[j.Name] {
+		name := SanitizeTerminalText(j.Name)
+		if seen[name] {
 			continue
 		}
-		seen[j.Name] = true
-		if len(j.Name) > maxLen {
-			maxLen = len(j.Name)
+		seen[name] = true
+		if len(name) > maxLen {
+			maxLen = len(name)
 		}
 	}
 	return maxLen
@@ -226,7 +227,12 @@ func maxJobNameWidth(jobs []JobResult) int {
 // formatTransfer returns a detail line for items that transferred files.
 // Format: "N transferred, B sent at S"
 func formatTransfer(s TransferStats) string {
-	return fmt.Sprintf("%d transferred, %s sent at %s", s.FilesTransferred, s.BytesSent, s.Speed)
+	return fmt.Sprintf(
+		"%d transferred, %s sent at %s",
+		s.FilesTransferred,
+		SanitizeTerminalText(s.BytesSent),
+		SanitizeTerminalText(s.Speed),
+	)
 }
 
 // formatChecked returns "N checked" with optional elapsed time.
@@ -264,26 +270,28 @@ func formatNumber(n int) string {
 // classified job status so the caller can tally it without re-scanning.
 // Single-source jobs get one line; multi-source jobs get a header plus
 // indented items.
-func renderRsyncJob(w io.Writer, job JobResult, nameWidth int, useColor bool) Status {
+func renderRsyncJob(w io.Writer, job JobResult, nameWidth int, colorMode TerminalColorMode) Status {
 	status := jobStatus(job)
-	symbol := statusSymbol(status, useColor)
+	symbol := statusSymbol(status, colorMode)
+	jobName := SanitizeTerminalText(job.Name)
 
 	if len(job.Items) == 1 {
 		item := job.Items[0]
-		stats := itemStatsText(item, useColor)
-		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name, stats)
+		stats := itemStatsText(item, colorMode)
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, jobName, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(colorMode, ansiGreen, formatTransfer(item.Stats)))
 		}
 		return status
 	}
 
-	_, _ = fmt.Fprintf(w, "  %s %s\n", symbol, job.Name)
+	_, _ = fmt.Fprintf(w, "  %s %s\n", symbol, jobName)
 	for _, item := range job.Items {
-		stats := itemStatsText(item, useColor)
-		_, _ = fmt.Fprintf(w, "      %s: %s\n", item.Name, stats)
+		itemName := SanitizeTerminalText(item.Name)
+		stats := itemStatsText(item, colorMode)
+		_, _ = fmt.Fprintf(w, "      %s: %s\n", itemName, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			_, _ = fmt.Fprintf(w, "      %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "      %s\n", colorize(colorMode, ansiGreen, formatTransfer(item.Stats)))
 		}
 	}
 	return status
@@ -294,21 +302,22 @@ func renderRsyncJob(w io.Writer, job JobResult, nameWidth int, useColor bool) St
 // without re-scanning. Groups with identical stats collapse into one line;
 // others expand into a tree.
 // Relies on the JobResult.Items invariant: Items always has at least one element.
-func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor bool) Status {
+func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, colorMode TerminalColorMode) Status {
 	status := groupStatus(group)
-	symbol := statusSymbol(status, useColor)
-	name := group[0].Name
+	symbol := statusSymbol(status, colorMode)
+	name := SanitizeTerminalText(group[0].Name)
 
 	if len(group) == 1 {
 		item := group[0].Items[0]
-		label := group[0].Remote + " · " + formatChecked(item.Stats)
-		stats := colorize(useColor, ansiDim, label)
+		remote := SanitizeTerminalText(group[0].Remote)
+		label := remote + " · " + formatChecked(item.Stats)
+		stats := colorize(colorMode, ansiDim, label)
 		if item.Status != StatusOK {
-			stats = itemStatsText(item, useColor)
+			stats = itemStatsText(item, colorMode)
 		}
 		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
-			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(colorMode, ansiGreen, formatTransfer(item.Stats)))
 		}
 		return status
 	}
@@ -319,7 +328,7 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 		if status == StatusOptionalMissing {
 			label := fmt.Sprintf("%d remotes · %s", len(group), collapseSuffixOptional)
 			_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
-				colorize(useColor, ansiDim, label))
+				colorize(colorMode, ansiDim, label))
 			return status
 		}
 		checked := group[0].Items[0].Stats.FilesChecked
@@ -327,12 +336,12 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 		collapsedStats := TransferStats{FilesChecked: checked, Elapsed: elapsed}
 		label := fmt.Sprintf("%d remotes · %s", len(group), formatChecked(collapsedStats))
 		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
-			colorize(useColor, ansiDim, label))
+			colorize(colorMode, ansiDim, label))
 		return status
 	}
 
 	_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, name,
-		colorize(useColor, ansiDim, fmt.Sprintf("%d remotes", len(group))))
+		colorize(colorMode, ansiDim, fmt.Sprintf("%d remotes", len(group))))
 	for idx, jr := range group {
 		item := jr.Items[0]
 		isLast := idx == len(group)-1
@@ -342,23 +351,25 @@ func renderRcloneGroup(w io.Writer, group []JobResult, nameWidth int, useColor b
 			branch = "└"
 			pipe = " "
 		}
-		stats := itemStatsText(item, useColor)
+		remote := SanitizeTerminalText(jr.Remote)
+		stats := itemStatsText(item, colorMode)
 		_, _ = fmt.Fprintf(w, "    %s %s  %s\n",
-			colorize(useColor, ansiDim, branch), jr.Remote, stats)
+			colorize(colorMode, ansiDim, branch), remote, stats)
 		if item.Status == StatusOK && item.Stats.FilesTransferred > 0 {
 			_, _ = fmt.Fprintf(w, "    %s %s\n",
-				colorize(useColor, ansiDim, pipe),
-				colorize(useColor, ansiGreen, formatTransfer(item.Stats)))
+				colorize(colorMode, ansiDim, pipe),
+				colorize(colorMode, ansiGreen, formatTransfer(item.Stats)))
 		}
 	}
 	return status
 }
 
 // renderSkippedJob writes a single skipped-job line.
-func renderSkippedJob(w io.Writer, job JobResult, nameWidth int, useColor bool) {
-	symbol := statusSymbol(StatusSkipped, useColor)
-	_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, job.Name,
-		colorize(useColor, ansiYellow, labelSkipped))
+func renderSkippedJob(w io.Writer, job JobResult, nameWidth int, colorMode TerminalColorMode) {
+	symbol := statusSymbol(StatusSkipped, colorMode)
+	jobName := SanitizeTerminalText(job.Name)
+	_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", symbol, nameWidth, jobName,
+		colorize(colorMode, ansiYellow, labelSkipped))
 }
 
 // incrementTally bumps the tally counter that corresponds to the given
@@ -378,16 +389,16 @@ func incrementTally(status Status, passed, optional, failed *int) {
 
 // formatTally builds the colored footer tally line.
 // The failed and optional segments are omitted when their counts are zero.
-func formatTally(passed, optional, failed int, d time.Duration, useColor bool) string {
+func formatTally(passed, optional, failed int, d time.Duration, colorMode TerminalColorMode) string {
 	var parts []string
-	parts = append(parts, colorize(useColor, ansiGreen, fmt.Sprintf("%d %s", passed, tallyLabelPassed)))
+	parts = append(parts, colorize(colorMode, ansiGreen, fmt.Sprintf("%d %s", passed, tallyLabelPassed)))
 	if optional > 0 {
-		parts = append(parts, colorize(useColor, ansiDim, fmt.Sprintf("%d %s", optional, tallyLabelOptional)))
+		parts = append(parts, colorize(colorMode, ansiDim, fmt.Sprintf("%d %s", optional, tallyLabelOptional)))
 	}
 	if failed > 0 {
-		parts = append(parts, colorize(useColor, ansiRed, fmt.Sprintf("%d %s", failed, tallyLabelFailed)))
+		parts = append(parts, colorize(colorMode, ansiRed, fmt.Sprintf("%d %s", failed, tallyLabelFailed)))
 	}
-	parts = append(parts, colorize(useColor, ansiDim, "Duration: "+FormatDuration(d)))
+	parts = append(parts, colorize(colorMode, ansiDim, "Duration: "+FormatDuration(d)))
 	return "  " + strings.Join(parts, "  ")
 }
 
@@ -397,12 +408,12 @@ func formatTally(passed, optional, failed int, d time.Duration, useColor bool) s
 // multiple remotes are grouped: identical results collapse to one line,
 // differing results expand into a tree with ├/└ branches. Transfer details
 // appear only when files were actually moved. Color output is controlled
-// by useColor; when false, plain text is emitted for log files and pipes.
-func RenderSummary(w io.Writer, s Summary, useColor bool) {
-	_, _ = fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
-	_, _ = fmt.Fprintln(w, colorize(useColor, ansiBold+ansiBlue, " Sync Summary"))
+// by colorMode; its zero value emits plain text for log files and pipes.
+func RenderSummary(w io.Writer, s Summary, colorMode TerminalColorMode) {
+	_, _ = fmt.Fprintln(w, colorize(colorMode, ansiDim, summaryDivider))
+	_, _ = fmt.Fprintln(w, colorize(colorMode, ansiBold+ansiBlue, " Sync Summary"))
 	if s.DryRun {
-		_, _ = fmt.Fprintln(w, colorize(useColor, ansiYellow, "  [DRY RUN]"))
+		_, _ = fmt.Fprintln(w, colorize(colorMode, ansiYellow, "  [DRY RUN]"))
 	}
 	_, _ = fmt.Fprintln(w)
 
@@ -414,33 +425,34 @@ func RenderSummary(w io.Writer, s Summary, useColor bool) {
 		job := s.Jobs[i]
 
 		if len(job.Items) == 1 && job.Items[0].Status == StatusSkipped {
-			renderSkippedJob(w, job, nameWidth, useColor)
+			renderSkippedJob(w, job, nameWidth, colorMode)
 			i++
 			continue
 		}
 
 		if job.Remote != "" {
 			group := collectGroup(s.Jobs, i)
-			status := renderRcloneGroup(w, group, nameWidth, useColor)
+			status := renderRcloneGroup(w, group, nameWidth, colorMode)
 			incrementTally(status, &passed, &optional, &failed)
 			i += len(group)
 			continue
 		}
 
-		status := renderRsyncJob(w, job, nameWidth, useColor)
+		status := renderRsyncJob(w, job, nameWidth, colorMode)
 		incrementTally(status, &passed, &optional, &failed)
 		i++
 	}
 
 	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, colorize(useColor, ansiDim, summaryDivider))
-	_, _ = fmt.Fprintln(w, formatTally(passed, optional, failed, s.Duration, useColor))
+	_, _ = fmt.Fprintln(w, colorize(colorMode, ansiDim, summaryDivider))
+	_, _ = fmt.Fprintln(w, formatTally(passed, optional, failed, s.Duration, colorMode))
 
 	if len(s.Errors) > 0 {
 		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, colorize(useColor, ansiRed, "  Errors:"))
+		_, _ = fmt.Fprintln(w, colorize(colorMode, ansiRed, "  Errors:"))
 		for _, e := range s.Errors {
-			_, _ = fmt.Fprintf(w, "    %s\n", colorize(useColor, ansiRed, "- "+e))
+			cleanError := SanitizeTerminalText(e)
+			_, _ = fmt.Fprintf(w, "    %s\n", colorize(colorMode, ansiRed, "- "+cleanError))
 		}
 	}
 }

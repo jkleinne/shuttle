@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 
+	"github.com/jkleinne/shuttle/internal/engine"
 	"github.com/jkleinne/shuttle/internal/log"
 )
 
@@ -117,27 +119,30 @@ func TestResolveColor(t *testing.T) {
 		mode        string
 		stdoutIsTTY bool
 		noColor     bool
-		want        bool
+		want        engine.TerminalColorMode
 	}{
-		{"never + TTY", colorNever, true, false, false},
-		{"never + non-TTY", colorNever, false, false, false},
-		{"always + TTY", colorAlways, true, false, true},
-		{"always + non-TTY", colorAlways, false, false, true},
-		{"auto + TTY", colorAuto, true, false, true},
-		{"auto + non-TTY", colorAuto, false, false, false},
-		{"NO_COLOR overrides always + TTY", colorAlways, true, true, false},
-		{"NO_COLOR overrides always + non-TTY", colorAlways, false, true, false},
-		{"NO_COLOR overrides auto + TTY", colorAuto, true, true, false},
-		{"NO_COLOR overrides auto + non-TTY", colorAuto, false, true, false},
-		{"NO_COLOR with never", colorNever, true, true, false},
-		{"NO_COLOR with never non-TTY", colorNever, false, true, false},
+		{"never + TTY", colorNever, true, false, engine.TerminalColorDisabled},
+		{"never + non-TTY", colorNever, false, false, engine.TerminalColorDisabled},
+		{"always + TTY", colorAlways, true, false, engine.TerminalColorEnabled},
+		{"always + non-TTY", colorAlways, false, false, engine.TerminalColorEnabled},
+		{"auto + TTY", colorAuto, true, false, engine.TerminalColorEnabled},
+		{"auto + non-TTY", colorAuto, false, false, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides always + TTY", colorAlways, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides always + non-TTY", colorAlways, false, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides auto + TTY", colorAuto, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR overrides auto + non-TTY", colorAuto, false, true, engine.TerminalColorDisabled},
+		{"NO_COLOR with never", colorNever, true, true, engine.TerminalColorDisabled},
+		{"NO_COLOR with never non-TTY", colorNever, false, true, engine.TerminalColorDisabled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveColor(tc.mode, tc.stdoutIsTTY, tc.noColor)
+			got := resolveColor(colorInputs{
+				mode:               tc.mode,
+				stdoutIsTerminal:   tc.stdoutIsTTY,
+				isNoColorRequested: tc.noColor,
+			})
 			if got != tc.want {
-				t.Errorf("resolveColor(%q, %v, %v) = %v, want %v",
-					tc.mode, tc.stdoutIsTTY, tc.noColor, got, tc.want)
+				t.Errorf("resolveColor() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -192,6 +197,28 @@ func TestCLI_Version_PrintsVersionCommitAndDate(t *testing.T) {
 	}
 }
 
+func TestVersionCommand_SanitizesBuildMetadata(t *testing.T) {
+	originalVersion, originalCommit, originalDate := version, commit, date
+	t.Cleanup(func() {
+		version, commit, date = originalVersion, originalCommit, originalDate
+	})
+	version = "v1\x1b[31m\n\t"
+	commit = "abc\x1b]0;title\x07\u009b32m"
+	date = "today\x7f"
+
+	command := newVersionCommand()
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("version command error = %v", err)
+	}
+	want := "shuttle v1[31m\ncommit: abc]0;title32m\nbuilt:  today\n"
+	if got := output.String(); got != want {
+		t.Errorf("version output = %q, want %q", got, want)
+	}
+}
+
 func TestCLI_Validate_ValidConfig_Succeeds(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
@@ -209,6 +236,25 @@ destination = %q
 	}
 	if !strings.Contains(result.stdout, "config ok") {
 		t.Errorf("stdout = %q, want it to contain 'config ok'", result.stdout)
+	}
+}
+
+func TestValidateCommand_SanitizesDisplayedConfigPath(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "valid\n\t\x1b[2J\u009b31m\x7f.toml")
+	_ = writeConfigTo(t, configPath, rsyncJobTOML(t, source, destination))
+	cli := &cliFlags{ConfigPath: configPath}
+	command := newValidateCommand(cli)
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("validate command error = %v", err)
+	}
+	want := "config ok: " + engine.SanitizeTerminalText(configPath) + "\n"
+	if got := output.String(); got != want {
+		t.Errorf("validate output = %q, want %q", got, want)
 	}
 }
 
@@ -231,6 +277,96 @@ func TestCLI_MalformedConfig_RunConfigError(t *testing.T) {
 	}
 	if result.stderr == "" {
 		t.Error("stderr should contain error text")
+	}
+}
+
+func TestCLI_MissingDefaultConfig_FailsBeforeLogging(t *testing.T) {
+	configHome := t.TempDir()
+	stateHome := filepath.Join(t.TempDir(), "state")
+	env := []string{
+		"XDG_CONFIG_HOME=" + configHome,
+		"XDG_STATE_HOME=" + stateHome,
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
+	}
+}
+
+func TestCLI_AllJobsFiltered_FailsBeforeLogging(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "first"
+engine = "rsync"
+sources = [%q]
+destination = %q
+
+[[job]]
+name = "second"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, source, destination, source, destination))
+	stateHome := strings.TrimPrefix(env[1], "XDG_STATE_HOME=")
+
+	result := runShuttle(t, env, "--skip", "first", "--skip", "second")
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
+	}
+}
+
+func TestCLI_SelectedRemoteMatchesNoSelectedJob_FailsBeforeCredentialHandling(t *testing.T) {
+	source := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "north-cloud"
+engine = "rclone"
+source = %q
+remotes = ["north"]
+mode = "copy"
+
+[[job]]
+name = "south-cloud"
+engine = "rclone"
+source = %q
+remotes = ["south"]
+mode = "copy"
+`, source, source))
+	stateHome := strings.TrimPrefix(env[1], "XDG_STATE_HOME=")
+
+	result := runShuttle(t, env, "--only", "north-cloud", "--remote", "south")
+
+	if result.exitCode != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.exitCode, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "no jobs selected") {
+		t.Errorf("stderr = %q, want actionable no-jobs error", result.stderr)
+	}
+	if strings.Contains(result.stderr, "RCLONE_CONFIG_PASS") ||
+		strings.Contains(result.stderr, "RCLONE_PASSWORD_COMMAND") {
+		t.Errorf("stderr = %q, want no credential warning", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(stateHome, "shuttle", "logs")); !os.IsNotExist(err) {
+		t.Errorf("log directory exists or stat failed with %v, want no logging I/O", err)
 	}
 }
 
@@ -277,6 +413,31 @@ destination = %q
 	result := runShuttle(t, env)
 	if result.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+}
+
+func TestCLI_RsyncOnly_DoesNotHandleRcloneCredentials(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	missingSource := filepath.Join(t.TempDir(), "missing")
+	env := writeConfig(t, fmt.Sprintf(`
+[[job]]
+name = "optional-device"
+engine = "rsync"
+sources = [%q]
+destination = %q
+optional = true
+`, missingSource, t.TempDir()))
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", result.exitCode, result.stderr)
+	}
+	if strings.Contains(result.stderr, "RCLONE_CONFIG_PASS") ||
+		strings.Contains(result.stderr, "RCLONE_PASSWORD_COMMAND") {
+		t.Errorf("stderr = %q, want no rclone credential handling", result.stderr)
 	}
 }
 
@@ -378,6 +539,39 @@ destination = %q
 	}
 }
 
+func TestCLI_QuietFailure_SanitizesDisplayedLogPath(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	missingSource := filepath.Join(t.TempDir(), "missing")
+	env := writeConfig(t, fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "quiet-fail"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, missingSource, t.TempDir()))
+	stateHome := filepath.Join(t.TempDir(), "state\n\t\x1b[2J\u009b31m\x7f")
+	env[1] = "XDG_STATE_HOME=" + stateHome
+
+	result := runShuttle(t, env, "--quiet")
+
+	if result.exitCode != exitPartialFailure {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitPartialFailure, result.stderr)
+	}
+	wantLogDir := engine.SanitizeTerminalText(filepath.Join(stateHome, "shuttle", "logs"))
+	logLineStart := strings.LastIndex(result.stderr, "\nLog: ")
+	if logLineStart == -1 || !strings.Contains(result.stderr[logLineStart:], wantLogDir) {
+		t.Errorf("stderr = %q, want sanitized log directory %q", result.stderr, wantLogDir)
+	}
+	if strings.Contains(result.stderr, "\x1b[2J") || strings.Contains(result.stderr, "\u009b31m") {
+		t.Errorf("stderr retained injected log path controls: %q", result.stderr)
+	}
+}
+
 func TestCLI_Verbose_PrintsExecLines(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")
@@ -436,6 +630,40 @@ destination = %q
 	}
 	if !strings.Contains(result.stdout, "\x1b[") {
 		t.Errorf("--color=always should emit ANSI codes on piped stdout, got: %q", result.stdout)
+	}
+}
+
+func TestCLI_RunSuccess_SanitizesDisplayedLogPath(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not found on PATH")
+	}
+	source := t.TempDir()
+	destination := t.TempDir()
+	env := writeConfig(t, fmt.Sprintf(`
+[defaults.rsync]
+flags = ["-a"]
+
+[[job]]
+name = "log-path"
+engine = "rsync"
+sources = [%q]
+destination = %q
+`, source, destination))
+	stateHome := filepath.Join(t.TempDir(), "state\n\t\x1b[2J\u009b31m\x7f")
+	env[1] = "XDG_STATE_HOME=" + stateHome
+
+	result := runShuttle(t, env)
+
+	if result.exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitSuccess, result.stderr)
+	}
+	wantLogDir := engine.SanitizeTerminalText(filepath.Join(stateHome, "shuttle", "logs"))
+	logLineStart := strings.LastIndex(result.stdout, "\nLog: ")
+	if logLineStart == -1 || !strings.Contains(result.stdout[logLineStart:], wantLogDir) {
+		t.Errorf("stdout = %q, want sanitized log directory %q", result.stdout, wantLogDir)
+	}
+	if strings.Contains(result.stdout, "\x1b[2J") || strings.Contains(result.stdout, "\u009b31m") {
+		t.Errorf("stdout retained injected log path controls: %q", result.stdout)
 	}
 }
 
@@ -569,6 +797,58 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
+func TestResolveConfigPath_DefaultRelativeXDG_ReturnsAbsolute(t *testing.T) {
+	t.Setenv(envConfigPath, "")
+	t.Setenv("XDG_CONFIG_HOME", "relative-config")
+	want, err := filepath.Abs(filepath.Join("relative-config", "shuttle", "config.toml"))
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+
+	got, explicit, err := resolveConfigPath("")
+
+	if err != nil {
+		t.Fatalf("resolveConfigPath() error = %v", err)
+	}
+	if explicit {
+		t.Error("explicit = true, want false for default path")
+	}
+	if got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+}
+
+func TestLogDirectory_RelativeXDG_ReturnsAbsolute(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "relative-state")
+	want, err := filepath.Abs(filepath.Join("relative-state", "shuttle", "logs"))
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+
+	got, err := logDirectory()
+
+	if err != nil {
+		t.Fatalf("logDirectory() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("logDirectory() = %q, want %q", got, want)
+	}
+}
+
+func TestLogDirectory_MissingHome_ReturnsError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+
+	got, err := logDirectory()
+
+	if err == nil {
+		t.Fatalf("logDirectory() = (%q, nil), want home lookup error", got)
+	}
+	if !strings.Contains(err.Error(), "home") {
+		t.Errorf("error = %q, want it to mention home", err)
+	}
+}
+
 func TestCLI_ConfigFlag_ValidPath_Succeeds(t *testing.T) {
 	if _, err := exec.LookPath("rsync"); err != nil {
 		t.Skip("rsync not found on PATH")
@@ -600,6 +880,38 @@ func TestCLI_ConfigFlag_MissingPath_UsageError(t *testing.T) {
 	}
 	if !strings.Contains(result.stderr, missing) {
 		t.Errorf("stderr should mention the path %q, got: %q", missing, result.stderr)
+	}
+}
+
+func TestCLI_MissingControlBearingConfigPath_SanitizesOneErrorRecord(t *testing.T) {
+	missing := filepath.Join(
+		t.TempDir(),
+		"missing\n\t\x1b[2J\x1b]0;title\x07\u009b31m\x7f.toml",
+	)
+	env := []string{
+		"XDG_STATE_HOME=" + t.TempDir(),
+		"HOME=" + t.TempDir(),
+		"PATH=" + os.Getenv("PATH"),
+	}
+
+	result := runShuttle(t, env, "validate", "--config", missing)
+
+	if result.exitCode != exitUsageError {
+		t.Fatalf("exit code = %d, want %d; stderr: %q", result.exitCode, exitUsageError, result.stderr)
+	}
+	if count := strings.Count(result.stderr, "Error:"); count != 1 {
+		t.Errorf("Error record count = %d, want 1; stderr: %q", count, result.stderr)
+	}
+	if count := strings.Count(result.stderr, "\n"); count != 1 {
+		t.Errorf("stderr line count = %d, want 1; stderr: %q", count, result.stderr)
+	}
+	if wantPath := engine.SanitizeTerminalText(missing); !strings.Contains(result.stderr, wantPath) {
+		t.Errorf("stderr = %q, want sanitized path %q", result.stderr, wantPath)
+	}
+	for _, r := range strings.TrimSuffix(result.stderr, "\n") {
+		if unicode.IsControl(r) {
+			t.Errorf("stderr retained control rune %U: %q", r, result.stderr)
+		}
 	}
 }
 
@@ -834,6 +1146,40 @@ filter_file = "/no/such/filter.txt"
 	}
 }
 
+func TestDoctorCommand_UsesCommandOutput(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "doctor.toml")
+	_ = writeConfigTo(t, configPath, `
+[[job]]
+name = "local"
+engine = "rsync"
+sources = ["/tmp"]
+destination = "/tmp/backup"
+`)
+	t.Setenv("PATH", t.TempDir())
+	cli := &cliFlags{ConfigPath: configPath, ColorMode: colorAuto}
+	command := newDoctorCommand(cli)
+	var output bytes.Buffer
+	command.SetOut(&output)
+
+	err := command.Execute()
+
+	if !errors.Is(err, errDoctorFailed) {
+		t.Fatalf("doctor command error = %v, want %v", err, errDoctorFailed)
+	}
+	if !strings.Contains(output.String(), "shuttle doctor") {
+		t.Errorf("command output = %q, want doctor report", output.String())
+	}
+	if strings.Contains(output.String(), "\x1b") {
+		t.Errorf("redirected auto-color output contains ANSI controls: %q", output.String())
+	}
+}
+
+func TestWriterIsTerminal_BufferIsNonTerminal(t *testing.T) {
+	if writerIsTerminal(&bytes.Buffer{}) {
+		t.Fatal("writerIsTerminal(buffer) = true, want false")
+	}
+}
+
 func TestCLI_OptionalMissing_ExitZero(t *testing.T) {
 	if _, err := exec.LookPath("rclone"); err != nil {
 		t.Skip("rclone not found on PATH; test requires rclone for prerequisite check")
@@ -865,19 +1211,132 @@ optional = true
 	}
 }
 
-func TestResolveRclonePassword_EnvPreset_ReturnsEmpty(t *testing.T) {
-	t.Setenv("RCLONE_CONFIG_PASS", "already-set")
-	logger, err := log.NewWithWriter(&bytes.Buffer{}, filepath.Join(t.TempDir(), "t.log"), false, log.VerbosityNormal)
+func newPasswordTestLogger(t *testing.T, output io.Writer) *log.Logger {
+	t.Helper()
+	logger, err := log.NewWithWriter(output, filepath.Join(t.TempDir(), "t.log"), log.Options{
+		UseColor:  false,
+		Verbosity: log.VerbosityNormal,
+	})
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
-	defer logger.Close()
+	t.Cleanup(logger.Close)
+	return logger
+}
 
-	if got := resolveRclonePassword(logger); got != "" {
-		t.Errorf("resolveRclonePassword() = %q, want \"\" when env is preset", got)
+func TestResolveRclonePassword_NativeEnvironmentSuppressesPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		variable string
+	}{
+		{name: "config password", variable: envRcloneConfigPass},
+		{name: "password command", variable: envRclonePasswordCommand},
 	}
-	if v := os.Getenv("RCLONE_CONFIG_PASS"); v != "already-set" {
-		t.Errorf("RCLONE_CONFIG_PASS = %q, want unchanged 'already-set'", v)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(envRcloneConfigPass, "")
+			t.Setenv(envRclonePasswordCommand, "")
+			t.Setenv(test.variable, "already-set")
+			readCalled := false
+			prompt := passwordPrompt{
+				writer:   io.Discard,
+				terminal: true,
+				readPassword: func() ([]byte, error) {
+					readCalled = true
+					return []byte("prompted-secret"), nil
+				},
+			}
+
+			got, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+			if err != nil {
+				t.Fatalf("resolveRclonePassword() error = %v", err)
+			}
+			if got != "" {
+				t.Errorf("resolveRclonePassword() = %q, want empty native inheritance", got)
+			}
+			if readCalled {
+				t.Error("password reader called despite native credential environment")
+			}
+			if value := os.Getenv(test.variable); value != "already-set" {
+				t.Errorf("%s = %q, want unchanged", test.variable, value)
+			}
+		})
+	}
+}
+
+func TestResolveRclonePassword_NonterminalWarningNamesNativeOptions(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	var output bytes.Buffer
+	prompt := passwordPrompt{
+		writer:   io.Discard,
+		terminal: false,
+		readPassword: func() ([]byte, error) {
+			t.Fatal("password reader called for nonterminal input")
+			return nil, nil
+		},
+	}
+
+	got, err := resolveRclonePassword(newPasswordTestLogger(t, &output), prompt)
+
+	if err != nil {
+		t.Fatalf("resolveRclonePassword() error = %v", err)
+	}
+	if got != "" {
+		t.Errorf("resolveRclonePassword() = %q, want empty", got)
+	}
+	for _, variable := range []string{envRcloneConfigPass, envRclonePasswordCommand} {
+		if !strings.Contains(output.String(), variable) {
+			t.Errorf("warning = %q, want it to name %s", output.String(), variable)
+		}
+	}
+}
+
+func TestResolveRclonePassword_ReadErrorWrapsContext(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	readErr := errors.New("terminal unavailable")
+	prompt := passwordPrompt{
+		writer:   io.Discard,
+		terminal: true,
+		readPassword: func() ([]byte, error) {
+			return nil, readErr
+		},
+	}
+
+	_, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+	if !errors.Is(err, readErr) {
+		t.Fatalf("resolveRclonePassword() error = %v, want wrapped read error", err)
+	}
+	if !strings.Contains(err.Error(), "reading rclone config password") {
+		t.Errorf("error = %q, want password read context", err)
+	}
+}
+
+func TestResolveRclonePassword_PromptedValueIsReturned(t *testing.T) {
+	t.Setenv(envRcloneConfigPass, "")
+	t.Setenv(envRclonePasswordCommand, "")
+	var output bytes.Buffer
+	prompt := passwordPrompt{
+		writer:   &output,
+		terminal: true,
+		readPassword: func() ([]byte, error) {
+			return []byte("prompted-secret"), nil
+		},
+	}
+
+	got, err := resolveRclonePassword(newPasswordTestLogger(t, io.Discard), prompt)
+
+	if err != nil {
+		t.Fatalf("resolveRclonePassword() error = %v", err)
+	}
+	if got != "prompted-secret" {
+		t.Errorf("resolveRclonePassword() = %q, want prompted value", got)
+	}
+	if !strings.Contains(output.String(), "Enter rclone config password") {
+		t.Errorf("prompt output = %q, want password prompt", output.String())
 	}
 }
 

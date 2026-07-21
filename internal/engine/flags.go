@@ -6,38 +6,70 @@ import (
 	"strings"
 
 	"github.com/jkleinne/shuttle/internal/config"
-	"github.com/jkleinne/shuttle/internal/log"
 )
+
+// WarningLogger lets flag conflict reporting remain independent of logger storage.
+type WarningLogger interface {
+	// Warn surfaces argument conflicts without coupling flag assembly to a concrete logger.
+	Warn(string)
+}
 
 // rsyncInstrumentationFlags are injected by Shuttle into every rsync call for
 // stats parsing and progress display. They are placed first so user-provided
 // flags can override via last-flag-wins semantics.
-var rsyncInstrumentationFlags = []string{"--stats", "--info=progress2"}
+const (
+	rsyncInfoProgressFlag = "--info=progress2"
+	rsyncOutFormatFlag    = "--out-format=%i %n%L"
+	rcloneUseJSONLogFlag  = "--use-json-log"
+	transferStatsFlag     = "--stats"
+	logFileFlag           = "--log-file"
+)
+
+var rsyncInstrumentationFlags = []string{
+	transferStatsFlag,
+	rsyncInfoProgressFlag,
+	rsyncOutFormatFlag,
+}
 
 // rsyncInstrumentationKeys lists the flag prefixes Shuttle checks when warning
 // about conflicts in rsync extra_flags.
-var rsyncInstrumentationKeys = []string{"--stats", "--info=progress2"}
+var rsyncInstrumentationKeys = []string{
+	transferStatsFlag,
+	rsyncInfoProgressFlag,
+	"--out-format",
+	"--log-format",
+}
 
 // rcloneInstrumentationKeys lists the flag prefixes Shuttle checks when warning
 // about conflicts in rclone extra_flags.
-var rcloneInstrumentationKeys = []string{"--stats", "--log-file", "--log-level"}
+var rcloneInstrumentationKeys = []string{
+	transferStatsFlag,
+	rcloneUseJSONLogFlag,
+	"--log-level",
+	logFileFlag,
+}
 
 // RsyncArgsRequest carries the inputs for one rsync argument assembly.
 // Grouped into a struct (mirroring RunnerConfig) so call sites name each
 // input and the builder stays within the project's argument-count budget.
 type RsyncArgsRequest struct {
-	Defaults    *config.RsyncDefaults
-	Job         config.Job
-	Source      string
+	// Defaults supplies baseline flags before job-level values apply.
+	Defaults *config.RsyncDefaults
+	// Job supplies the behavior and overrides selected for this invocation.
+	Job config.Job
+	// Source remains a distinct final argument so user-controlled paths never enter a shell.
+	Source string
+	// Destination remains a distinct final argument so user-controlled paths never enter a shell.
 	Destination string
-	IsDeleteDir bool // guards --delete-after; never set for single-file sources
-	DryRun      bool
-	LogFile     string
+	// IsDeleteDir prevents directory deletion semantics from reaching single-file sources.
+	IsDeleteDir bool
+	// DryRun requests rsync's non-mutating execution mode at the boundary.
+	DryRun bool
 }
 
 // BuildRsyncArgs assembles the full argument list for an rsync invocation.
 // Order: instrumentation (lowest precedence) → default flags → per-job
-// extra_flags → behavioral flags (delete, dry-run, log-file) → source → dest.
+// extra_flags → behavioral flags (delete, dry-run) → source → dest.
 //
 // Instrumentation flags come first so user flags can override via last-flag-wins
 // rsync semantics.
@@ -62,10 +94,6 @@ func BuildRsyncArgs(req RsyncArgsRequest) []string {
 	if req.DryRun {
 		args = append(args, "--dry-run")
 	}
-	if req.LogFile != "" {
-		args = append(args, "--log-file="+req.LogFile)
-	}
-
 	// 5. Source and destination are always last.
 	args = append(args, req.Source, req.Destination)
 
@@ -74,14 +102,20 @@ func BuildRsyncArgs(req RsyncArgsRequest) []string {
 
 // RcloneArgsRequest carries the inputs for one rclone argument assembly.
 type RcloneArgsRequest struct {
-	Subcommand   string // rclone subcommand (config.ModeCopy or config.ModeSync spelling)
-	Defaults     *config.RcloneDefaults
-	Job          config.Job
-	Source       string
-	Destination  string
-	DryRun       bool
-	LogFile      string
-	BackupDirArg string // pre-built --backup-dir value; empty omits the flag
+	// Subcommand carries the validated copy or sync mode selected for this invocation.
+	Subcommand string
+	// Defaults supplies baseline flags and tuning before job-level values apply.
+	Defaults *config.RcloneDefaults
+	// Job supplies the behavior, filter, and tuning overrides selected for this invocation.
+	Job config.Job
+	// Source remains a distinct final argument so user-controlled paths never enter a shell.
+	Source string
+	// Destination remains a distinct final argument so user-controlled paths never enter a shell.
+	Destination string
+	// DryRun requests rclone's non-mutating execution mode at the boundary.
+	DryRun bool
+	// BackupDirArg carries the pre-built retention target, with an empty value omitting the flag.
+	BackupDirArg string
 }
 
 // BuildRcloneArgs assembles the full argument list for an rclone invocation.
@@ -96,10 +130,16 @@ func BuildRcloneArgs(req RcloneArgsRequest) []string {
 
 	// The subcommand (copy/sync) is always first, immediately followed by
 	// instrumentation flags (step 1).
-	args = append(args, req.Subcommand, "--stats", "1s", "-P")
-	if req.LogFile != "" {
-		args = append(args, "--log-file", req.LogFile, "--log-level", "INFO")
-	}
+	args = append(
+		args,
+		req.Subcommand,
+		transferStatsFlag,
+		"1s",
+		"-P",
+		rcloneUseJSONLogFlag,
+		"--log-level",
+		"INFO",
+	)
 
 	// 2. Default flags from [defaults.rclone].
 	if req.Defaults != nil {
@@ -152,7 +192,7 @@ func BuildRcloneArgs(req RcloneArgsRequest) []string {
 //
 // engineName is config.EngineRsync or config.EngineRclone; anything else warns about nothing. userFlags are the extra_flags values
 // from the job config.
-func WarnFlagConflicts(logger *log.Logger, engineName string, userFlags []string) {
+func WarnFlagConflicts(logger WarningLogger, engineName string, userFlags []string) {
 	var keys []string
 	switch engineName {
 	case config.EngineRsync:

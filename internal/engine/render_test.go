@@ -7,15 +7,15 @@ import (
 
 func TestStatusSymbol_TimedOut_SharesFailedGlyph(t *testing.T) {
 	// StatusTimedOut is a failure; it must share the ✗ glyph with StatusFailed.
-	got := statusSymbol(StatusTimedOut, false)
+	got := statusSymbol(StatusTimedOut, TerminalColorDisabled)
 	if got != symbolFailed {
 		t.Errorf("statusSymbol(StatusTimedOut, false) = %q, want %q", got, symbolFailed)
 	}
 }
 
 func TestStatusSymbol_TimedOut_ColorEnabled_WrapsRed(t *testing.T) {
-	got := statusSymbol(StatusTimedOut, true)
-	want := colorize(true, ansiRed, symbolFailed)
+	got := statusSymbol(StatusTimedOut, TerminalColorEnabled)
+	want := colorize(TerminalColorEnabled, ansiRed, symbolFailed)
 	if got != want {
 		t.Errorf("statusSymbol(StatusTimedOut, true) = %q, want %q", got, want)
 	}
@@ -23,7 +23,7 @@ func TestStatusSymbol_TimedOut_ColorEnabled_WrapsRed(t *testing.T) {
 
 func TestItemStatsText_TimedOut_PlainText(t *testing.T) {
 	item := ItemResult{Status: StatusTimedOut}
-	got := itemStatsText(item, false)
+	got := itemStatsText(item, TerminalColorDisabled)
 	if got != labelTimedOut {
 		t.Errorf("itemStatsText(StatusTimedOut, false) = %q, want %q", got, labelTimedOut)
 	}
@@ -31,8 +31,8 @@ func TestItemStatsText_TimedOut_PlainText(t *testing.T) {
 
 func TestItemStatsText_TimedOut_ColorEnabled_WrapsRed(t *testing.T) {
 	item := ItemResult{Status: StatusTimedOut}
-	got := itemStatsText(item, true)
-	want := colorize(true, ansiRed, labelTimedOut)
+	got := itemStatsText(item, TerminalColorEnabled)
+	want := colorize(TerminalColorEnabled, ansiRed, labelTimedOut)
 	if got != want {
 		t.Errorf("itemStatsText(StatusTimedOut, true) = %q, want %q", got, want)
 	}
@@ -50,7 +50,7 @@ func TestRenderSummary_TimedOut_ContainsTimedOutAndTalliesAsFailed(t *testing.T)
 		},
 	}
 	var buf strings.Builder
-	RenderSummary(&buf, s, false)
+	RenderSummary(&buf, s, TerminalColorDisabled)
 	output := buf.String()
 
 	if !strings.Contains(output, "timed out") {

@@ -17,12 +17,12 @@ For encrypted, deduplicated, snapshot-based backups, see [restic](https://restic
 
 - **One config, two engines.** Rsync jobs (local sync) and rclone jobs (cloud upload) live in the same TOML file.
 - **Partial failure resilience.** A broken source doesn't abort the run. Failed items are logged and summarized; everything else completes.
-- **Archive-safe cloud sync.** Sync mode with `backup_path` moves deleted files to timestamped archive directories on the remote, with configurable retention and automatic cleanup.
+- **Archive-safe cloud sync.** Sync mode with `backup_path` moves deleted files to timestamped archive directories on the remote, with configurable retention. Cleanup validates a complete, bounded remote directory listing before it purges anything.
 - **Runtime job selection.** `--skip`, `--only`, and `--remote` flags let you run subsets without editing config.
 - **Dry-run preview.** See what would change before committing.
 - **Live progress.** Spinner with transfer stats on interactive terminals, plain status lines in pipes and cron.
 - **Dual logging.** Colored terminal output and a timestamped plain-text log file.
-- **Exclusive locking.** Per-config flock prevents concurrent runs of the same pipeline.
+- **Exclusive locking.** A canonical per-config flock prevents concurrent runs of the same pipeline, including runs started through path or symlink aliases.
 
 ## Requirements
 
@@ -148,6 +148,8 @@ Honors `--config` and `--color`. Exits `0` when all checks pass or only warn, `2
 
 Config lives at `${XDG_CONFIG_HOME:-~/.config}/shuttle/config.toml` by default. Override with `--config <path>` or `SHUTTLE_CONFIG=<path>` for alternate configs (per-host, CI, multiple profiles). See [`config.example.toml`](config.example.toml) for a complete annotated example.
 
+Configuration decoding is strict. Unknown or misspelled keys at the top level, in default sections, or in job entries are rejected instead of being silently ignored.
+
 ### Defaults
 
 Optional baseline settings applied to all jobs of a given engine. Per-job fields override these.
@@ -245,13 +247,17 @@ backup_retention_days = 365
 
 ## Logging
 
-Logs are written to `${XDG_STATE_HOME:-~/.local/state}/shuttle/logs/`. Each run creates a timestamped log file. The path is printed at the end of every run.
+Logs are written to `${XDG_STATE_HOME:-~/.local/state}/shuttle/logs/`. Each run creates a distinct timestamped log file, including when multiple runs start in the same second. Shuttle keeps the log directory private (`0700`) and creates log files with mode `0600`. The path is printed at the end of every run.
+
+Shuttle is the sole writer of the primary log. Records retained from rsync and rclone are bounded, stripped of control and bidirectional formatting characters, serialized, and written under trusted `[RSYNC]` or `[RCLONE]` prefixes.
 
 At startup `shuttle` prunes log files older than `log_retention_days` (default 30) so the directory does not grow unbounded under regular cron use. Pruning is best-effort: a failure on any individual file is recorded as a warning and does not block the backup.
 
 ## Encrypted Rclone Remotes
 
-If your rclone config is encrypted, `shuttle` prompts for the password on interactive terminals. For unattended runs (cron, launchd), set `RCLONE_CONFIG_PASS` in the environment.
+If your rclone config is encrypted, `shuttle` prompts for the password on interactive terminals only when the selected work includes an rclone job. Rsync-only runs and selections with no rclone operations do not prompt.
+
+For unattended runs (cron, launchd), use either of rclone's native credential environment variables: set `RCLONE_CONFIG_PASS` directly, or set `RCLONE_PASSWORD_COMMAND` to a command that supplies the password.
 
 ## Platform Support
 

@@ -65,21 +65,21 @@ func TestIsRcloneRemote(t *testing.T) {
 
 func TestRcloneDestName(t *testing.T) {
 	tests := []struct {
-		name     string
-		jobDest  string
-		source   string
-		isRemote bool
-		want     string
+		name    string
+		jobDest string
+		source  string
+		want    string
 	}{
-		{"explicit destination", "custom", "/tmp/src", false, "custom"},
-		{"local source basename", "", "/tmp/Documents/", false, "Documents"},
-		{"remote source path", "", "remote:path/to/docs", true, "docs"},
-		{"remote root", "", "remote:/", true, ""},
-		{"remote bare", "", "remote:", true, ""},
+		{"explicit destination", "custom", "/tmp/src", "custom"},
+		{"absolute local source", "", "/tmp/Documents/", "Documents"},
+		{"expanded home source", "", "/Users/alice/Pictures/", "Pictures"},
+		{"remote source path", "", "remote:path/to/docs", "docs"},
+		{"remote root", "", "remote:/", ""},
+		{"bare remote", "", "remote:", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := rcloneDestName(tt.jobDest, tt.source, tt.isRemote)
+			got := rcloneDestName(tt.jobDest, tt.source)
 			if got != tt.want {
 				t.Errorf("rcloneDestName() = %q, want %q", got, tt.want)
 			}
