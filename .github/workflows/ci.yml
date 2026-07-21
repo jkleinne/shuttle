@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  RCLONE_VERSION: "1.74.4"
+  RCLONE_RELEASE_VERSION: "1.74.4"
   RCLONE_LINUX_AMD64_SHA256: "fe435e0c36228e7c2f116a8701f01127bb1f694005fc11d1f27186c8bca4115d"
 
 jobs:
@@ -36,16 +36,16 @@ jobs:
           )
           sudo apt-get "${apt_options[@]}" update
           sudo apt-get "${apt_options[@]}" install --yes curl rsync unzip
-          archive="rclone-v${RCLONE_VERSION}-linux-amd64.zip"
+          archive="rclone-v${RCLONE_RELEASE_VERSION}-linux-amd64.zip"
           archive_path="${RUNNER_TEMP}/${archive}"
           curl --fail --location --silent --show-error --retry 4 \
             --retry-all-errors --connect-timeout 15 --max-time 300 \
             --output "${archive_path}" \
-            "https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/${archive}"
+            "https://github.com/rclone/rclone/releases/download/v${RCLONE_RELEASE_VERSION}/${archive}"
           echo "${RCLONE_LINUX_AMD64_SHA256}  ${archive_path}" | sha256sum --check -
           unzip -q "${archive_path}" -d "${RUNNER_TEMP}/rclone"
           sudo install -m 0755 \
-            "${RUNNER_TEMP}/rclone/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" \
+            "${RUNNER_TEMP}/rclone/rclone-v${RCLONE_RELEASE_VERSION}-linux-amd64/rclone" \
             /usr/local/bin/rclone
 
       - name: Verify sync tools
@@ -61,7 +61,7 @@ jobs:
           fi
           printf '%s\n' "${resolved_rclone}"
           rclone_version="$("${resolved_rclone}" version)"
-          if [[ "${rclone_version%%$'\n'*}" != "rclone v${RCLONE_VERSION}" ]]; then
+          if [[ "${rclone_version%%$'\n'*}" != "rclone v${RCLONE_RELEASE_VERSION}" ]]; then
             echo "unexpected rclone version: ${rclone_version%%$'\n'*}" >&2
             exit 1
           fi
